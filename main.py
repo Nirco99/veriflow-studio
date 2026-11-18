@@ -1,0 +1,1610 @@
+"""VeriFlow Studio - Verilog IDE, course linter and one-click iverilog/vvp runner for Computer Structure courses.
+
+Layout follows the VS Code workbench: title/action bar, activity bar, side bar, editor group, panel, status bar.
+"""
+from __future__ import annotations
+
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import tkinter as tk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
+
+import customtkinter as ctk
+
+from config_manager import (ACCENT, APP_NAME, APP_VERSION, CHOICES, DARK_SCHEME, DEFAULT_CONFIG, EDITOR_SCHEMES,
+                            FONT_FAMILIES, LIGHT_SCHEME, RADIXES, RUN_GREEN, RUN_GREEN_HOVER, STATUS_COLORS, STOP_RED,
+                            STOP_RED_HOVER, VS, VSCODE_THEMES, ConfigManager, detect_toolchains, resource_dir)
+from ui_components import (SNIPPETS, ActivityBar, MiniWaveformViewer, PanelTabs, SideSection, TruthTableGrid,
+                           VerilogCodeEditor, entry_style, ghost_button, hline, icon_button, is_dark, option_style,
+                           seg_style, slim_scrollbar, style_treeview, ui_scale, vline)
+from verilog_parser import (describe_ports, generate_testbench_skeleton, instantiation_template, new_module_template,
+                            parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
+from verilog_runner import NO_WINDOW, STATUS_FAIL, STATUS_XZ, VerilogRunner, clean_binaries, format_cmd
+
+IS_WINDOWS = os.name == "nt"
+LAYOUT_LABELS = {"Side-by-Side": "Side-by-Side Split (.v + _tb.v)", "Tabbed": "Tabbed View"}
+SEV_ICON = {"error": "⊗ error", "warning": "⚠ warning", "info": "ⓘ info"}
+SNIPPET_LABEL = "+ Snippet ▾"
+RECENT_LABEL = "Recent ▾"
+WHITE = "#FFFFFF"
+STOP_IDLE = ("#D5D5D5", "#3A3A3A")
+
+
+def read_source(path: Path) -> tuple[str, str]:
+    """Return (text, newline) - keeps the file's original line-ending style for round-trips."""
+    raw = path.read_bytes()
+    nl = "\r\n" if b"\r\n" in raw else "\n"
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1255" if IS_WINDOWS else "latin-1", errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n"), nl
+
+
+def font(size: int = 12, weight: str = "normal") -> ctk.CTkFont:
+    return ctk.CTkFont(size=size, weight=weight)
+
+
+# =========================================================================== settings dialog
+class SettingsDialog(ctk.CTkToplevel):
+    """4-tab live-apply settings window. Every control writes straight into ConfigManager."""
+
+    def __init__(self, app: "VeriFlowApp"):
+        super().__init__(app)
+        self.app, self.cfg = app, app.cfg
+        self.title(f"{APP_NAME} - Settings")
+        self.geometry("780x640")
+        self.minsize(700, 560)
+        self.transient(app)
+        self.configure(fg_color=VS["editor"])
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.vars: dict[str, tk.Variable] = {}
+        self.path_status: dict[str, ctk.CTkLabel] = {}
+        tv = ctk.CTkTabview(self, corner_radius=3, fg_color=VS["sidebar"], border_width=1, border_color=VS["border"],
+                            segmented_button_fg_color=("#E5E5E5", "#2D2D2D"), segmented_button_selected_color=("#BCD9F5", "#04395E"),
+                            segmented_button_selected_hover_color=("#A9CDEF", "#0A4A75"),
+                            segmented_button_unselected_color=("#F3F3F3", "#2D2D2D"),
+                            segmented_button_unselected_hover_color=VS["hover"], text_color=("#1F1F1F", "#E0E0E0"))
+        tv.grid(row=0, column=0, sticky="nsew", padx=12, pady=(8, 4))
+        t1, t2, t3, t4 = (tv.add(n) for n in ("Appearance & Font", "Editor Behavior", "Compiler & Toolchain", "Linter & Sync"))
+        for t in (t1, t2, t3, t4):
+            t.grid_columnconfigure(1, weight=1)
+
+        self._option(t1, 0, "Appearance mode", "appearance_mode", list(CHOICES["appearance_mode"]))
+        self._option(t1, 1, "UI accent theme (restart)", "color_theme", list(CHOICES["color_theme"]))
+        self._option(t1, 2, "Editor color scheme", "editor_color_scheme", list(EDITOR_SCHEMES))
+        self._option(t1, 3, "UI scaling", "ui_scale_percent", [f"{v}%" for v in CHOICES["ui_scale_percent"]],
+                     to_cfg=lambda s: int(s.rstrip("%")), to_ui=lambda v: f"{v}%")
+        self._option(t1, 4, "Editor font family", "editor_font_family", list(FONT_FAMILIES))
+        self._slider(t1, 5, "Editor font size", "editor_font_size", 8, 28, 20, "{:.0f} pt", int)
+        self._slider(t1, 6, "Console / table font size", "console_font_size", 8, 24, 16, "{:.0f} pt", int)
+        self._option(t1, 7, "Default radix", "default_radix", list(RADIXES))
+
+        self._option(t2, 0, "Editor layout", "editor_split_layout", list(LAYOUT_LABELS.values()),
+                     to_cfg=lambda s: next(k for k, v in LAYOUT_LABELS.items() if v == s), to_ui=lambda v: LAYOUT_LABELS[v])
+        self._option(t2, 1, "Tab size", "tab_size", ["2", "4", "8"], to_cfg=int, to_ui=str)
+        for r, (label, key) in enumerate((("Insert spaces for Tab", "insert_spaces_for_tabs"), ("Word wrap", "word_wrap"),
+                                          ("Highlight current line", "highlight_current_line"), ("Auto-indent", "auto_indent"),
+                                          ("Auto-close brackets & begin/end", "auto_close_brackets_and_blocks"),
+                                          ("Auto-save before Run (F5)", "auto_save_before_run"),
+                                          ("Auto-save on focus loss", "auto_save_on_focus_loss")), start=2):
+            self._switch(t2, r, label, key)
+
+        for r, (label, key, folder) in enumerate((("iverilog.exe", "iverilog_path", False), ("vvp.exe", "vvp_path", False),
+                                                  ("gtkwave.exe", "gtkwave_path", False), ("Lecturer library (-y)", "lib_dir", True),
+                                                  ("notepad++.exe", "notepad_pp_path", False))):
+            self._path(t3, r, label, key, folder)
+        ghost_button(t3, "🔍 Auto-Detect Paths", self._autodetect).grid(row=5, column=1, sticky="w", pady=(6, 10))
+        self._option(t3, 6, "Verilog generation flag", "std_flag", list(CHOICES["std_flag"]))
+        self._switch(t3, 7, "Include workspace folder as -y library", "include_workdir_as_ylib")
+        self._switch(t3, 8, "Enable -Wall & -Winfloop warnings", "enable_wall_warnings")
+        self._switch(t3, 9, "Non-interactive vvp -n ($stop acts as $finish)", "vvp_non_interactive_flag")
+        self._slider(t3, 10, "Simulation timeout", "sim_timeout_sec", 1.0, 30.0, 58, "{:.1f} s", float)
+
+        self._switch(t4, 0, "Enable static course linter (implicit wires, port mismatches)", "enable_course_linter")
+        self._switch(t4, 1, "Strict gate-level course mode (flags assign/always/+/-/?: in .v designs)", "strict_gate_level_mode")
+        self._switch(t4, 2, "Live Notepad++ sync (watch files on disk)", "live_sync_enabled")
+        self._switch(t4, 3, "Auto-run when an external save is detected", "auto_run_on_external_save")
+        self._slider(t4, 4, "Polling interval", "external_poll_interval_ms", 500, 3000, 25, "{:.0f} ms", int)
+        ctk.CTkLabel(t4, text="Tip: open the files in Notepad++ (📝), edit there, press Ctrl+S -\n"
+                              "VeriFlow reloads the code and re-runs the simulation automatically.",
+                     justify="left", text_color=VS["muted"]).grid(row=5, column=0, columnspan=3, sticky="w", pady=12)
+
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        ctk.CTkLabel(bottom, text=f"Settings file: {self.cfg.path}", text_color=VS["muted"], font=font(11)).pack(side="left")
+        ctk.CTkButton(bottom, text="Close", width=90, height=26, corner_radius=3, fg_color=VS["accent"],
+                      command=self.destroy).pack(side="right")
+        ghost_button(bottom, "Reset to Defaults", self._reset, width=130).pack(side="right", padx=8)
+        self.after(120, self._raise)
+
+    def _raise(self) -> None:
+        self.lift()
+        self.focus_force()
+
+    def _label(self, tab, row: int, text: str) -> None:
+        ctk.CTkLabel(tab, text=text, anchor="w", text_color=VS["text"]).grid(row=row, column=0, sticky="w", padx=(6, 14), pady=5)
+
+    def _option(self, tab, row, label, key, values, to_cfg=lambda s: s, to_ui=lambda v: v) -> None:
+        self._label(tab, row, label)
+        var = tk.StringVar(value=to_ui(self.cfg[key]))
+        self.vars[key] = var
+        var._to_ui = to_ui  # type: ignore[attr-defined]
+        ctk.CTkOptionMenu(tab, values=values, variable=var, width=260, command=lambda s: self.cfg.update(**{key: to_cfg(s)}),
+                          **option_style()).grid(row=row, column=1, sticky="w", pady=5)
+
+    def _switch(self, tab, row, label, key) -> None:
+        var = tk.BooleanVar(value=bool(self.cfg[key]))
+        self.vars[key] = var
+        ctk.CTkSwitch(tab, text=label, variable=var, switch_width=34, switch_height=16, progress_color=VS["accent"],
+                      text_color=VS["text"], command=lambda: self.cfg.update(**{key: var.get()})).grid(
+            row=row, column=0, columnspan=3, sticky="w", padx=6, pady=5)
+
+    def _slider(self, tab, row, label, key, lo, hi, steps, fmt, cast) -> None:
+        self._label(tab, row, label)
+        var = tk.DoubleVar(value=float(self.cfg[key]))
+        self.vars[key] = var
+        val = ctk.CTkLabel(tab, text=fmt.format(self.cfg[key]), width=70, text_color=VS["text"])
+        val.grid(row=row, column=2, padx=6)
+
+        def moved(v):
+            val.configure(text=fmt.format(v))
+            self.cfg.update(**{key: cast(round(v, 1))})
+        ctk.CTkSlider(tab, from_=lo, to=hi, number_of_steps=steps, variable=var, command=moved, height=14,
+                      button_color=VS["accent"], progress_color=VS["accent"]).grid(row=row, column=1, sticky="ew", pady=5)
+        var._fmt_label = (val, fmt)  # type: ignore[attr-defined]
+
+    def _path(self, tab, row, label, key, folder) -> None:
+        self._label(tab, row, label)
+        var = tk.StringVar(value=self.cfg[key])
+        self.vars[key] = var
+        ent = ctk.CTkEntry(tab, textvariable=var, height=26, **entry_style())
+        ent.grid(row=row, column=1, sticky="ew", pady=4)
+        commit = lambda *_: (self.cfg.update(**{key: var.get().strip().strip('"')}), self._refresh_status())
+        ent.bind("<Return>", commit)
+        ent.bind("<FocusOut>", commit)
+        cell = ctk.CTkFrame(tab, fg_color="transparent")
+        cell.grid(row=row, column=2, padx=4)
+
+        def browse():
+            cur = Path(var.get()) if var.get() else Path("C:/")
+            p = (filedialog.askdirectory(parent=self, initialdir=str(cur if cur.is_dir() else cur.parent)) if folder else
+                 filedialog.askopenfilename(parent=self, initialdir=str(cur.parent), filetypes=[("Programs", "*.exe"), ("All", "*.*")]))
+            if p:
+                var.set(str(Path(p)))
+                commit()
+        ghost_button(cell, "Browse…", browse, width=72).pack(side="left")
+        st = ctk.CTkLabel(cell, text="", width=24)
+        st.pack(side="left", padx=4)
+        self.path_status[key] = st
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        for key, lab in self.path_status.items():
+            p = Path(self.cfg[key])
+            ok = p.is_dir() if key == "lib_dir" else p.is_file()
+            lab.configure(text="✓" if ok else "✗", text_color=ACCENT["ok"] if ok else ACCENT["err"])
+
+    def _autodetect(self) -> None:
+        found = {k: v for k, v in detect_toolchains().items() if v}
+        self.cfg.update(**found)
+        self.sync_from_config()
+        messagebox.showinfo("Auto-Detect", "Found:\n" + ("\n".join(f"  {k}: {v}" for k, v in found.items()) or "  nothing"), parent=self)
+
+    def _reset(self) -> None:
+        if messagebox.askyesno("Reset settings", "Reset every setting (except workspaces) to its default?", parent=self):
+            self.cfg.reset()
+            self.sync_from_config()
+
+    def sync_from_config(self) -> None:
+        for key, var in self.vars.items():
+            v = self.cfg[key]
+            if isinstance(var, tk.BooleanVar):
+                var.set(bool(v))
+            elif isinstance(var, tk.DoubleVar):
+                var.set(float(v))
+                lab, fmt = var._fmt_label  # type: ignore[attr-defined]
+                lab.configure(text=fmt.format(v))
+            else:
+                var.set(getattr(var, "_to_ui", lambda x: x)(v))
+        self._refresh_status()
+
+
+# =========================================================================== main window
+class VeriFlowApp(ctk.CTk):
+    def __init__(self):
+        self.cfg = ConfigManager()
+        ctk.set_appearance_mode(self.cfg["appearance_mode"])
+        ctk.set_default_color_theme(self.cfg["color_theme"])
+        ctk.set_widget_scaling(self.cfg["ui_scale_percent"] / 100)
+        super().__init__()
+        self.title(f"{APP_NAME} {APP_VERSION}")
+        self.geometry(self.cfg["window_geometry"])
+        if self.cfg["window_geometry"] == DEFAULT_CONFIG["window_geometry"] and IS_WINDOWS:
+            self.after(0, lambda: self.state("zoomed"))      # first run: fill the screen
+        self.minsize(1180, 680)
+        self.configure(fg_color=VS["editor"])
+        self.events: queue.Queue = queue.Queue()
+        self.runner = VerilogRunner(self.cfg, self.events)
+        self.work_dir: Path | None = None
+        self.module: str | None = None
+        self.modules: dict[str, dict] = {}
+        self.extra_vars: dict[str, tk.BooleanVar] = {}
+        self.lib_modules: dict[str, dict] = {}
+        self.ws_modules: dict[str, dict] = {}
+        self._parse_cache: dict = {}
+        self.lint_diags: list[dict] = []
+        self.run_diags: list[dict] = []
+        self.diag_rows: dict[str, dict] = {}
+        self.last_vcd: str | None = None
+        self.known_mtime: dict[str, float] = {}
+        self._ws_signature = None
+        self._sync_job = self._lint_job = None
+        self._last_focus_check = 0.0
+        self._settings: SettingsDialog | None = None
+        self._lib_selected: dict | None = None
+        self._port_widths: dict[str, int] = {}
+        self._recent_map: dict[str, str] = {}
+        self._tool_text = ""
+        self._probe_result = ""
+        self._status_state = "ready"
+        self.active_editor: VerilogCodeEditor | None = None
+        self.tab_shown = "design"
+        self.cmd_mode = "Actual"
+        self.sidebar_visible = bool(self.cfg["sidebar_visible"])
+        self.style = ttk.Style(self)
+        self.sc = ui_scale(self)
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+        self._build_titlebar()
+        self._build_banner()
+        self._build_body()
+        self._build_statusbar()
+        self.cfg.subscribe(self._on_config_changed)
+        self._bind_shortcuts()
+        self._apply_theme()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(60, self._poll_events)
+        self.after(120, self._startup)
+
+    # ================================================================== Zone 1: title / action bar
+    def _build_titlebar(self) -> None:
+        bar = ctk.CTkFrame(self, height=40, corner_radius=0, fg_color=VS["toolbar"])
+        bar.grid(row=0, column=0, sticky="ew")
+        bar.grid_propagate(False)
+        bar.grid_rowconfigure(0, weight=1)
+        bar.grid_columnconfigure(3, weight=1)
+        hline(self).grid(row=1, column=0, sticky="ew")
+
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.grid(row=0, column=0, padx=(8, 0))
+        ghost_button(left, "📂 Open…", self.choose_folder, height=26).pack(side="left", padx=(0, 4))
+        self.recent_menu = ctk.CTkOptionMenu(left, values=[RECENT_LABEL], width=112, command=self._open_recent, **option_style())
+        self.recent_menu.set(RECENT_LABEL)
+        self.recent_menu.pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(left, text="Module:", text_color=VS["muted"], font=font(12)).pack(side="left", padx=(0, 4))
+        self.module_menu = ctk.CTkOptionMenu(left, values=["(no modules)"], width=140, command=self._module_selected, **option_style())
+        self.module_menu.pack(side="left", padx=(0, 4))
+        ghost_button(left, "+ New .v", self.new_module, height=26).pack(side="left")
+        vline(bar).grid(row=0, column=1, sticky="ns", padx=10, pady=9)
+
+        group = ctk.CTkFrame(bar, corner_radius=3, fg_color=VS["group"], border_width=1, border_color=VS["group_border"])
+        group.grid(row=0, column=2)
+        self.run_btn = ctk.CTkButton(group, text="▶  Run (F5)", width=96, height=26, corner_radius=3, fg_color=RUN_GREEN,
+                                     hover_color=RUN_GREEN_HOVER, text_color=WHITE, text_color_disabled="#E6FFEC",
+                                     font=font(12, "bold"), command=self.run_pipeline)
+        self.run_btn.pack(side="left", padx=(3, 2), pady=3)
+        self.stop_btn = ctk.CTkButton(group, text="■ Stop", width=62, height=26, corner_radius=3, fg_color=STOP_IDLE,
+                                      hover_color=STOP_RED_HOVER, text_color=WHITE, text_color_disabled=("#8A8A8A", "#8A8A8A"),
+                                      font=font(12), state="disabled", command=self.stop_run)
+        self.stop_btn.pack(side="left", padx=2, pady=3)
+        for text, cmd in (("🔍 Lint (F7)", lambda: self.run_lint(show=True)), ("🧪 Gen _tb.v", self.generate_tb),
+                          ("💾 Save All", self.save_all)):
+            vline(group).pack(side="left", fill="y", pady=6)
+            icon_button(group, text, cmd, width=0, height=26, font=font(12)).pack(side="left", padx=2, pady=3)
+        vline(group).pack(side="left", fill="y", pady=6)
+        self.sync_switch = ctk.CTkSwitch(group, text="⚡ N++ Sync", switch_width=30, switch_height=15, progress_color=VS["accent"],
+                                         text_color=VS["text"], font=font(12),
+                                         command=lambda: self.cfg.update(live_sync_enabled=bool(self.sync_switch.get())))
+        self.sync_switch.pack(side="left", padx=(8, 6), pady=3)
+
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.grid(row=0, column=4, padx=(0, 8))
+        icon_button(right, "📝 Notepad++", self.open_in_npp, width=0, font=font(12)).pack(side="left", padx=1)
+        icon_button(right, "🧹 Clean", self.clean, width=0, font=font(12)).pack(side="left", padx=1)
+        self.snippet_menu = ctk.CTkOptionMenu(right, values=list(SNIPPETS), width=112, command=self._insert_snippet, **option_style())
+        self.snippet_menu.set(SNIPPET_LABEL)
+        self.snippet_menu.pack(side="left", padx=(4, 6))
+        vline(right).pack(side="left", fill="y", pady=9, padx=4)
+        icon_button(right, "A-", lambda: self.zoom(-1), width=28, font=font(12)).pack(side="left")
+        self.font_lbl = ctk.CTkLabel(right, text="13pt", width=38, text_color=VS["text"], font=font(12))
+        self.font_lbl.pack(side="left")
+        icon_button(right, "A+", lambda: self.zoom(1), width=28, font=font(12)).pack(side="left")
+        vline(right).pack(side="left", fill="y", pady=9, padx=4)
+        self.theme_btn = icon_button(right, "☀", self.toggle_theme, width=32, font=font(15))
+        self.theme_btn.pack(side="left", padx=1)
+        icon_button(right, "⚙", self.open_settings, width=32, font=font(15)).pack(side="left", padx=1)
+
+    def _build_banner(self) -> None:
+        self.banner = ctk.CTkFrame(self, corner_radius=0, height=30, fg_color=("#FFF4CE", "#3D3313"))
+        self.banner_lbl = ctk.CTkLabel(self.banner, text="", text_color=("#7A5A00", "#E9C46A"), anchor="w", font=font(12, "bold"))
+        self.banner_lbl.pack(side="left", padx=12, pady=3)
+        ghost_button(self.banner, "Auto-Detect", self._banner_detect, width=100, height=22).pack(side="right", padx=6)
+        ghost_button(self.banner, "⚙ Configure paths", self.open_settings, width=140, height=22).pack(side="right", padx=6)
+
+    # ================================================================== Zones 2-4: activity bar, side bar, editors, panel
+    def _build_body(self) -> None:
+        sc = self.sc
+        body = ctk.CTkFrame(self, corner_radius=0, fg_color=VS["editor"])
+        body.grid(row=3, column=0, sticky="nsew")
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(2, weight=1)
+        self.activity = ActivityBar(body, [("explorer", "📁", "Explorer  (Ctrl+B)"), ("library", "📚", "Lecturer Library"),
+                                           ("run", "▶", "Run & Compile"), ("npp", "📝", "Open in Notepad++")],
+                                    [("settings", "⚙", "Settings  (Ctrl+,)")], self._on_activity)
+        self.activity.grid(row=0, column=0, sticky="ns")
+        vline(body).grid(row=0, column=1, sticky="ns")
+        self.hpane = tk.PanedWindow(body, orient="horizontal", sashwidth=max(2, int(2 * sc)), bd=0, sashrelief="flat")
+        self.hpane.grid(row=0, column=2, sticky="nsew")
+
+        self.sidebar = ctk.CTkFrame(self.hpane, corner_radius=0, fg_color=VS["sidebar"])
+        self.sidebar.grid_columnconfigure(0, weight=1)
+        self.sidebar.grid_rowconfigure(0, weight=1)
+        self.views = {"explorer": self._build_explorer(self.sidebar), "library": self._build_library(self.sidebar),
+                      "run": self._build_run_view(self.sidebar)}
+        self.vpane = tk.PanedWindow(self.hpane, orient="vertical", sashwidth=max(2, int(2 * sc)), bd=0, sashrelief="flat")
+        if self.sidebar_visible:
+            self.hpane.add(self.sidebar, minsize=int(200 * sc), width=int(250 * sc))
+        self.hpane.add(self.vpane, minsize=int(500 * sc), stretch="always")
+
+        self.ed_area = ctk.CTkFrame(self.vpane, corner_radius=0, fg_color=VS["editor"])
+        self.ed_area.grid_rowconfigure(0, weight=1)
+        common = dict(on_save=self.save_editor, on_modified=self._on_editor_modified, on_cursor=self._on_cursor,
+                      on_zoom=self.zoom, on_focus=self._on_editor_focus)
+        self.design_ed = VerilogCodeEditor(self.ed_area, self.cfg, role="DESIGN", **common)
+        self.tb_ed = VerilogCodeEditor(self.ed_area, self.cfg, role="TESTBENCH", **common)
+        self.ed_split = vline(self.ed_area)
+        for ed in (self.design_ed, self.tb_ed):
+            ed.on_app_ctrl = self._on_ctrl
+        self.tb_ed.on_generate = self.generate_tb
+        self.active_editor = self.design_ed
+        self.vpane.add(self.ed_area, minsize=int(200 * sc), stretch="always")
+        self.vpane.add(self._build_panel(self.vpane), minsize=int(150 * sc), height=int(300 * sc))
+        self._layout_editors()
+        self._show_view(self.cfg["sidebar_view"])
+
+    def _side_header(self, parent, title: str, actions: list) -> ctk.CTkLabel:
+        head = ctk.CTkFrame(parent, height=35, corner_radius=0, fg_color=VS["sidebar"])
+        head.grid(row=0, column=0, sticky="ew")
+        head.grid_propagate(False)
+        head.grid_columnconfigure(0, weight=1)
+        head.grid_rowconfigure(0, weight=1)
+        lab = ctk.CTkLabel(head, text=title, anchor="w", text_color=VS["sidebar_header"], font=font(11))
+        lab.grid(row=0, column=0, sticky="ew", padx=(14, 4))
+        for c, (icon, cmd) in enumerate(actions, start=1):
+            icon_button(head, icon, cmd, width=24, height=22, font=font(14)).grid(row=0, column=c, padx=1)
+        ctk.CTkFrame(head, width=6, fg_color="transparent").grid(row=0, column=len(actions) + 1)
+        return lab
+
+    def _scroll_list(self, parent, **kw) -> ctk.CTkScrollableFrame:
+        f = ctk.CTkScrollableFrame(parent, corner_radius=0, fg_color=VS["sidebar"], scrollbar_button_color=VS["scroll_thumb"],
+                                   scrollbar_button_hover_color=VS["scroll_hover"], **kw)
+        f.grid_columnconfigure(0, weight=1)
+        return f
+
+    def _build_explorer(self, parent) -> ctk.CTkFrame:
+        v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
+        v.grid_columnconfigure(0, weight=1)
+        self.explorer_title = self._side_header(v, "EXPLORER", [("+", self.new_module), ("↻", self._refresh_workspace),
+                                                                ("📂", self.choose_folder)])
+        weights = {1: 3, 2: 1}
+
+        def toggled(sec):
+            r = 1 if sec is self.sec_modules else 2
+            v.grid_rowconfigure(r, weight=weights[r] if sec.open else 0)
+        self.sec_modules = SideSection(v, "MODULES", on_toggle=toggled)
+        self.sec_modules.grid(row=1, column=0, sticky="nsew")
+        self.sec_modules.body.grid_rowconfigure(0, weight=1)
+        self.mod_list = self._scroll_list(self.sec_modules.body)
+        self.mod_list.grid(row=0, column=0, sticky="nsew")
+        self.sec_extra = SideSection(v, "EXTRA .V FILES (COMPILE OVERRIDES)", on_toggle=toggled)
+        self.sec_extra.grid(row=2, column=0, sticky="nsew")
+        self.sec_extra.body.grid_rowconfigure(0, weight=1)
+        self.extra_list = self._scroll_list(self.sec_extra.body, height=110)
+        self.extra_list.grid(row=0, column=0, sticky="nsew")
+        for r, w in weights.items():
+            v.grid_rowconfigure(r, weight=w)
+        self.ws_label = ctk.CTkLabel(v, text="No folder open", anchor="w", justify="left", wraplength=230,
+                                     text_color=VS["muted"], font=font(10))
+        self.ws_label.grid(row=3, column=0, sticky="ew", padx=14, pady=(2, 6))
+        return v
+
+    def _build_library(self, parent) -> ctk.CTkFrame:
+        v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
+        v.grid_columnconfigure(0, weight=1)
+        v.grid_rowconfigure(3, weight=3)
+        v.grid_rowconfigure(5, weight=2)
+        self.library_title = self._side_header(v, "LIBRARY: COMPSTRUCT\\LIB", [("↻", self._load_library)])
+        self.lib_search = ctk.CTkEntry(v, placeholder_text="🔍 Filter library modules…", height=26, **entry_style())
+        self.lib_search.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 4))
+        self.lib_search.bind("<KeyRelease>", lambda e: self._render_library())
+        self.lib_label = ctk.CTkLabel(v, text="", anchor="w", justify="left", wraplength=230, text_color=VS["muted"], font=font(10))
+        self.lib_label.grid(row=2, column=0, sticky="ew", padx=14)
+        self.lib_list = self._scroll_list(v)
+        self.lib_list.grid(row=3, column=0, sticky="nsew")
+        hline(v).grid(row=4, column=0, sticky="ew")
+        self.lib_detail = ctk.CTkTextbox(v, height=150, font=("Consolas", 11), wrap="none", corner_radius=0, border_width=0,
+                                         fg_color=VS["editor"], text_color=VS["text"])
+        self.lib_detail.grid(row=5, column=0, sticky="nsew")
+        btns = ctk.CTkFrame(v, fg_color="transparent")
+        btns.grid(row=6, column=0, sticky="ew", padx=8, pady=6)
+        btns.grid_columnconfigure((0, 1), weight=1)
+        ghost_button(btns, "📋 Copy Instantiation", self._copy_inst, height=24).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        ghost_button(btns, "⤵ Insert at Cursor", self._insert_inst, height=24).grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        return v
+
+    def _build_run_view(self, parent) -> ctk.CTkFrame:
+        v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
+        v.grid_columnconfigure(0, weight=1)
+        self._side_header(v, "RUN & COMPILE", [])
+        ctk.CTkButton(v, text="▶  Run (F5)", height=28, corner_radius=3, fg_color=RUN_GREEN, hover_color=RUN_GREEN_HOVER,
+                      text_color=WHITE, font=font(12, "bold"), command=self.run_pipeline).grid(
+            row=1, column=0, sticky="ew", padx=12, pady=(4, 10))
+        self.run_vars: dict[str, tk.Variable] = {}
+        ctk.CTkLabel(v, text="LANGUAGE STANDARD", anchor="w", text_color=VS["sidebar_header"], font=font(11, "bold")).grid(
+            row=2, column=0, sticky="ew", padx=14)
+        std = tk.StringVar(value=self.cfg["std_flag"])
+        self.run_vars["std_flag"] = std
+        ctk.CTkOptionMenu(v, values=list(CHOICES["std_flag"]), variable=std, command=lambda s: self.cfg.update(std_flag=s),
+                          **option_style()).grid(row=3, column=0, sticky="ew", padx=12, pady=(2, 10))
+        ctk.CTkLabel(v, text="FLAGS", anchor="w", text_color=VS["sidebar_header"], font=font(11, "bold")).grid(
+            row=4, column=0, sticky="ew", padx=14)
+        row = 5
+        for key, label in (("include_workdir_as_ylib", "-y <workspace>  (find your own modules)"),
+                           ("enable_wall_warnings", "-Wall -Winfloop warnings"),
+                           ("vvp_non_interactive_flag", "vvp -n  ($stop never hangs)"),
+                           ("enable_course_linter", "Course linter"),
+                           ("strict_gate_level_mode", "Strict gate-level mode"),
+                           ("auto_save_before_run", "Auto-save before run")):
+            var = tk.BooleanVar(value=bool(self.cfg[key]))
+            self.run_vars[key] = var
+            ctk.CTkCheckBox(v, text=label, variable=var, checkbox_width=15, checkbox_height=15, corner_radius=2, border_width=1,
+                            text_color=VS["text"], font=font(12), command=lambda k=key, vv=var: self.cfg.update(**{k: vv.get()})).grid(
+                row=row, column=0, sticky="w", padx=14, pady=3)
+            row += 1
+        self.timeout_lbl = ctk.CTkLabel(v, text="", anchor="w", text_color=VS["muted"], font=font(11))
+        self.timeout_lbl.grid(row=row, column=0, sticky="ew", padx=14, pady=(6, 8))
+        ctk.CTkLabel(v, text="COMMAND LINE", anchor="w", text_color=VS["sidebar_header"], font=font(11, "bold")).grid(
+            row=row + 1, column=0, sticky="ew", padx=14)
+        self.run_cmd_box = ctk.CTkTextbox(v, height=130, wrap="char", corner_radius=0, border_width=1, border_color=VS["border"],
+                                          fg_color=VS["editor"], text_color=VS["text"], font=("Consolas", 11))
+        self.run_cmd_box.grid(row=row + 2, column=0, sticky="nsew", padx=12, pady=(2, 8))
+        v.grid_rowconfigure(row + 2, weight=1)
+        btns = ctk.CTkFrame(v, fg_color="transparent")
+        btns.grid(row=row + 3, column=0, sticky="ew", padx=10, pady=(0, 10))
+        btns.grid_columnconfigure((0, 1, 2), weight=1)
+        ghost_button(btns, "📋 Copy", self._copy_cmd, height=24).grid(row=0, column=0, sticky="ew", padx=2)
+        ghost_button(btns, "🧹 Clean", self.clean, height=24).grid(row=0, column=1, sticky="ew", padx=2)
+        ghost_button(btns, "📈 GTKWave", self.open_gtkwave, height=24).grid(row=0, column=2, sticky="ew", padx=2)
+        return v
+
+    def _build_panel(self, parent) -> PanelTabs:
+        self.panel = PanelTabs(parent, command=self._on_btab)
+        t_console = self.panel.add("console", "Console Output")
+        t_prob = self.panel.add("problems", "Problems & Linter")
+        t_table = self.panel.add("table", "Truth Table")
+        t_wave = self.panel.add("wave", "Waveform")
+        r = self.panel.right
+        r.grid_columnconfigure(1, weight=1)
+        r.grid_rowconfigure(0, weight=1)
+        ctk.CTkLabel(r, text="CMD:", text_color=VS["muted"], font=font(11, "bold")).grid(row=0, column=0, padx=(0, 6))
+        self.cmd_var = tk.StringVar(value="Open a workspace to see the exact iverilog / vvp command line")
+        self.cmd_entry = ctk.CTkEntry(r, textvariable=self.cmd_var, font=("Consolas", 11), height=22, state="readonly", **entry_style())
+        self.cmd_entry.grid(row=0, column=1, sticky="ew")
+        self.cmd_seg = ctk.CTkSegmentedButton(r, values=["Actual", "Baseline"], command=self._cmd_mode, **{**seg_style(), "height": 22})
+        self.cmd_seg.set("Actual")
+        self.cmd_seg.grid(row=0, column=2, padx=6)
+        ghost_button(r, "📋 Copy CMD", self._copy_cmd, width=96, height=22).grid(row=0, column=3)
+
+        self.console = ctk.CTkTextbox(t_console, wrap="none", corner_radius=0, border_width=0,
+                                      font=(self.cfg["editor_font_family"], self.cfg["console_font_size"]))
+        self.console.grid(row=0, column=0, sticky="nsew", padx=(8, 0))
+        self.console.configure(state="disabled")
+        pf = ctk.CTkFrame(t_prob, fg_color="transparent", corner_radius=0)
+        pf.grid(row=0, column=0, sticky="nsew")
+        pf.grid_columnconfigure(0, weight=1)
+        pf.grid_rowconfigure(0, weight=1)
+        self.prob_tree = ttk.Treeview(pf, columns=("sev", "file", "line", "msg", "src"), show="headings", style="VF.Treeview")
+        for cid, text, w, stretch in (("sev", "Severity", 100, False), ("file", "File", 170, False), ("line", "Line", 60, False),
+                                      ("msg", "Message", 600, True), ("src", "Source", 80, False)):
+            self.prob_tree.heading(cid, text=text, anchor="w")
+            self.prob_tree.column(cid, width=int(w * self.sc), stretch=stretch, anchor="w")
+        self.prob_tree.grid(row=0, column=0, sticky="nsew")
+        psb = slim_scrollbar(pf, self.prob_tree.yview)
+        psb.grid(row=0, column=1, sticky="ns")
+        self.prob_tree.configure(yscrollcommand=psb.set)
+        self.prob_tree.bind("<ButtonRelease-1>", self._on_problem_click)
+        self.prob_tree.bind("<Return>", self._on_problem_click)
+        self.truth = TruthTableGrid(t_table, self.cfg, on_radix=lambda rr: self.wave.set_radix(rr))
+        self.truth.grid(row=0, column=0, sticky="nsew")
+        self.wave = MiniWaveformViewer(t_wave, self.cfg, on_open_gtkwave=self.open_gtkwave)
+        self.wave.grid(row=0, column=0, sticky="nsew")
+        self.panel.set_badge("problems", 0)
+        return self.panel
+
+    # ================================================================== Zone 5: status bar
+    def _build_statusbar(self) -> None:
+        # plain tk widgets: one solid colour band that recolours instantly (blue / orange / red)
+        color = STATUS_COLORS["ready"]
+        sb = tk.Frame(self, bg=color, height=int(22 * self.sc), bd=0, highlightthickness=0)
+        sb.grid(row=4, column=0, sticky="ew")
+        sb.grid_propagate(False)
+        sb.grid_rowconfigure(0, weight=1)
+        self.statusbar = sb
+        self._st_labels: list[tk.Label] = []
+        st_font = ("Segoe UI", -max(9, round(12 * self.sc)))
+
+        def item(col, text="", click=None, weight=0):
+            lab = tk.Label(sb, text=text, bg=color, fg=WHITE, font=st_font, bd=0, padx=int(6 * self.sc),
+                           anchor="w" if weight else "center", cursor="hand2" if click else "")
+            lab.grid(row=0, column=col, sticky="nsew" if weight else "ns")
+            if weight:
+                sb.grid_columnconfigure(col, weight=weight)
+            if click:
+                lab.bind("<Button-1>", lambda e: click())
+                lab.bind("<Enter>", lambda e, l=lab: l.configure(bg=self._status_hover()))
+                lab.bind("<Leave>", lambda e, l=lab: l.configure(bg=STATUS_COLORS[self._status_state]))
+            self._st_labels.append(lab)
+            return lab
+        self.st_state = item(0, "⚡ Ready")
+        self.st_saved = item(1, "✔ Saved")
+        self.st_time = item(2, "⏱ Pipeline: -")
+        self.st_sync = item(3, "⇄ N++ Sync: OFF", click=lambda: self.cfg.update(live_sync_enabled=not self.cfg["live_sync_enabled"]))
+        self.st_msg = item(4, "", weight=1)
+        self.st_module = item(5, "Module: -")
+        self.st_pos = item(6, "Ln 1, Col 1")
+        self.st_spaces = item(7, "Spaces: 4", click=self.open_settings)
+        self.st_font = item(8, "Font: 13pt", click=self.open_settings)
+        item(9, "UTF-8")
+        self.st_std = item(10, "SystemVerilog (-g2012)", click=lambda: self._show_view("run", force=True))
+        self.st_tool = item(11, "", click=self.open_settings)
+
+    def _status_hover(self) -> str:
+        """VS Code lightens a status-bar item on hover."""
+        c = STATUS_COLORS[self._status_state].lstrip("#")
+        r, g, b = (min(255, int(c[i:i + 2], 16) + 28) for i in (0, 2, 4))
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def _set_status(self, state: str, text: str) -> None:
+        self._status_state = state
+        color = STATUS_COLORS[state]
+        self.statusbar.configure(bg=color)
+        for lab in self._st_labels:
+            lab.configure(bg=color)
+        self.st_state.configure(text=text)
+
+    def _refresh_status_items(self) -> None:
+        c = self.cfg
+        self.st_sync.configure(text=f"⇄ N++ Sync: {'ON' if c['live_sync_enabled'] else 'OFF'}")
+        self.st_module.configure(text=f"Module: {self.module or '-'}")
+        self.st_spaces.configure(text=f"Spaces: {c['tab_size']}" if c["insert_spaces_for_tabs"] else f"Tab Size: {c['tab_size']}")
+        self.st_font.configure(text=f"Font: {c['editor_font_size']}pt")
+        std = c["std_flag"]
+        self.st_std.configure(text=f"{'SystemVerilog' if 'sv' in std or '2012' in std else 'Verilog'} ({std})")
+        self.st_tool.configure(text=self._tool_text)
+
+    # ================================================================== startup / theme
+    def _startup(self) -> None:
+        self._refresh_recent_menu()
+        self._update_toolchain_ui()
+        self._load_library()
+        if self.cfg["live_sync_enabled"]:
+            self.sync_switch.select()
+        folder = Path(self.cfg["last_workspace_dir"]) if self.cfg["last_workspace_dir"] else None
+        if folder and folder.is_dir():
+            self.open_workspace(folder)
+        else:
+            sample = self._sample_dir()
+            if sample:
+                self.open_workspace(sample)
+        self._restart_sync()
+        self._sync_run_view()
+        self._refresh_status_items()
+        self.log(f"{APP_NAME} {APP_VERSION} ready.  F5 Run · F7 Lint · Ctrl+B side bar · Ctrl+F find · Ctrl+G go to line · "
+                 f"Ctrl+/ comment · Ctrl+wheel zoom", "dim")
+
+    def _sample_dir(self) -> Path | None:
+        src = resource_dir() / "sample_project"
+        if not src.is_dir():
+            return None
+        if getattr(sys, "frozen", False):        # bundled exe: copy the demo to a writable place once
+            dst = Path.home() / "Documents" / "VeriFlow Studio" / "sample_project"
+            if not dst.exists():
+                try:
+                    shutil.copytree(src, dst)
+                except OSError:
+                    return None
+            return dst
+        return src
+
+    def _apply_theme(self) -> None:
+        dark = is_dark(self.cfg)
+        th = VSCODE_THEMES["Dark" if dark else "Light"]
+        sc = self.cfg.scheme
+        self.hpane.configure(bg=th["border"])
+        self.vpane.configure(bg=th["border"])
+        style_treeview(self.style, self.cfg, ui_scale(self))
+        for ed in (self.design_ed, self.tb_ed):
+            ed.apply_editor_settings(self.cfg)
+        self.console.configure(fg_color=sc["console_bg"], text_color=sc["console_fg"],
+                               font=(self.cfg["editor_font_family"], self.cfg["console_font_size"]))
+        light = not sc["dark"]
+        for tag, color in (("err", "#A1260D" if light else "#F48771"), ("warn", "#9A5B00" if light else "#CCA700"),
+                           ("ok", "#16825D" if light else "#89D185"), ("cmd", "#005FB8" if light else "#3794FF"),
+                           ("dim", "#767676" if light else "#858585"), ("head", "#AF00DB" if light else "#C586C0")):
+            self.console.tag_config(tag, foreground=color)
+        for tag, (lc, dc) in {"error": ("#A1260D", "#F48771"), "warning": ("#9A5B00", "#CCA700"), "info": ("#005FB8", "#3794FF")}.items():
+            self.prob_tree.tag_configure(tag, foreground=dc if dark else lc)
+        self.truth.apply_theme(self.cfg)
+        self.wave.apply_theme(self.cfg)
+        self.theme_btn.configure(text="☀" if dark else "🌙")
+        self.font_lbl.configure(text=f"{self.cfg['editor_font_size']}pt")
+        self._refresh_siblings()
+        self._refresh_status_items()
+
+    def _on_config_changed(self, keys: set[str]) -> None:
+        if "appearance_mode" in keys:
+            ctk.set_appearance_mode(self.cfg["appearance_mode"])
+        if "ui_scale_percent" in keys:
+            ctk.set_widget_scaling(self.cfg["ui_scale_percent"] / 100)
+        if "color_theme" in keys:
+            self.log(f"Accent theme '{self.cfg['color_theme']}' will apply after restarting {APP_NAME}.", "dim")
+        if "editor_split_layout" in keys:
+            self._layout_editors()
+        if "default_radix" in keys:
+            self.truth.set_radix(self.cfg["default_radix"])
+            self.wave.set_radix(self.cfg["default_radix"])
+        if keys & {"iverilog_path", "vvp_path", "gtkwave_path", "notepad_pp_path", "lib_dir"}:
+            self._update_toolchain_ui()
+            if "lib_dir" in keys:
+                self._load_library()
+        if keys & {"live_sync_enabled", "external_poll_interval_ms"}:
+            (self.sync_switch.select if self.cfg["live_sync_enabled"] else self.sync_switch.deselect)()
+            self._restart_sync()
+        if keys & {"enable_course_linter", "strict_gate_level_mode"}:
+            self.run_lint()
+        if keys & {"std_flag", "include_workdir_as_ylib", "enable_wall_warnings", "vvp_non_interactive_flag",
+                   "iverilog_path", "vvp_path", "lib_dir"}:
+            self._update_cmd()
+        visual = {"appearance_mode", "editor_color_scheme", "editor_font_family", "editor_font_size", "console_font_size",
+                  "tab_size", "word_wrap", "highlight_current_line", "insert_spaces_for_tabs", "ui_scale_percent"}
+        if keys & visual:
+            self.after(30, self._apply_theme)
+        if keys - {"sidebar_view", "sidebar_visible", "last_module", "last_workspace_dir", "recent_workspaces"}:
+            self._sync_run_view()
+            self._refresh_status_items()
+        if self._settings is not None and self._settings.winfo_exists():
+            self._settings.sync_from_config()
+
+    def _sync_run_view(self) -> None:
+        for key, var in self.run_vars.items():
+            v = self.cfg[key]
+            if var.get() != v:
+                var.set(v)
+        self.timeout_lbl.configure(text=f"Simulation timeout: {self.cfg['sim_timeout_sec']:.1f} s  (Settings → Compiler)")
+
+    def _update_toolchain_ui(self) -> None:
+        st = self.cfg.toolchain_status()
+        if st["iverilog"] and st["vvp"]:
+            self.banner.grid_remove()
+            self._tool_text = "iverilog ✓"
+            self._probe_version()
+        else:
+            self.banner_lbl.configure(text=f"⚠  Icarus Verilog not found at {self.cfg['iverilog_path']} - DEMO MODE: "
+                                           f"the built-in Python gate-level simulator runs instead (1-bit gate designs only).")
+            self.banner.grid(row=2, column=0, sticky="ew")
+            self._tool_text = "⚠ DEMO MODE (no iverilog)"
+        if not st["lib"]:
+            self.lib_label.configure(text=f"Library folder not found:\n{self.cfg['lib_dir']}")
+        self._refresh_status_items()
+
+    def _probe_version(self) -> None:
+        def work():
+            try:
+                r = subprocess.run([self.cfg["iverilog_path"], "-V"], capture_output=True, timeout=6, stdin=subprocess.DEVNULL,
+                                   creationflags=NO_WINDOW)
+                first = (r.stdout or r.stderr).decode(errors="replace").splitlines()[0]
+                m = re.search(r"version\s+([\d.]+)", first)
+                text = f"iverilog {m.group(1)} ✓" if m else "iverilog ✓"
+            except (OSError, subprocess.SubprocessError, IndexError):
+                text = "iverilog: cannot execute ✗"
+            self._probe_result = text          # picked up by _poll_events on the Tk thread
+        threading.Thread(target=work, daemon=True).start()
+
+    def _banner_detect(self) -> None:
+        found = {k: v for k, v in detect_toolchains().items() if v}
+        self.cfg.update(**found)
+        if not self.cfg.toolchain_available():
+            messagebox.showwarning("Auto-Detect", "Icarus Verilog was not found.\nInstall it to C:\\iverilog or set the paths in ⚙ Settings.")
+
+    def toggle_theme(self) -> None:
+        if is_dark(self.cfg):
+            self.cfg.update(appearance_mode="Light", editor_color_scheme=LIGHT_SCHEME)
+        else:
+            scheme = self.cfg["editor_color_scheme"]
+            self.cfg.update(appearance_mode="Dark",
+                            editor_color_scheme=DARK_SCHEME if scheme in (LIGHT_SCHEME, "GitHub Light") else scheme)
+
+    def zoom(self, delta: int) -> None:
+        if delta == 0:
+            self.cfg.update(editor_font_size=DEFAULT_CONFIG["editor_font_size"], console_font_size=DEFAULT_CONFIG["console_font_size"])
+        else:
+            self.cfg.update(editor_font_size=self.cfg["editor_font_size"] + delta,
+                            console_font_size=self.cfg["console_font_size"] + delta)
+
+    def open_settings(self) -> None:
+        if self._settings is not None and self._settings.winfo_exists():
+            self._settings.lift()
+            self._settings.focus_force()
+            return
+        self._settings = SettingsDialog(self)
+
+    # ================================================================== activity bar / side bar
+    def _on_activity(self, key: str) -> None:
+        if key == "npp":
+            self.open_in_npp()
+        elif key == "settings":
+            self.open_settings()
+        elif self.sidebar_visible and self.cfg["sidebar_view"] == key:
+            self.toggle_sidebar()                 # VS Code: clicking the active view collapses the side bar
+        else:
+            self._show_view(key, force=True)
+
+    def _show_view(self, key: str, force: bool = False) -> None:
+        if key not in self.views:
+            key = "explorer"
+        for k, v in self.views.items():
+            if k == key:
+                v.grid(row=0, column=0, sticky="nsew")
+            else:
+                v.grid_remove()
+        if force and not self.sidebar_visible:
+            self.toggle_sidebar()
+        if self.cfg["sidebar_view"] != key:
+            self.cfg.update(sidebar_view=key)
+        self.activity.set_active(key if self.sidebar_visible else None)
+
+    def toggle_sidebar(self) -> None:
+        if self.sidebar_visible:
+            self.hpane.forget(self.sidebar)
+        else:
+            self.hpane.add(self.sidebar, before=self.vpane, minsize=int(200 * self.sc), width=int(250 * self.sc))
+        self.sidebar_visible = not self.sidebar_visible
+        self.activity.set_active(self.cfg["sidebar_view"] if self.sidebar_visible else None)
+        self.cfg.update(sidebar_visible=self.sidebar_visible)
+
+    def _refresh_workspace(self) -> None:
+        if self.work_dir:
+            self._scan_workspace(force=True)
+            self.st_msg.configure(text="Workspace refreshed")
+
+    # ================================================================== editor group layout
+    def _layout_editors(self) -> None:
+        for w in (self.design_ed, self.tb_ed, self.ed_split):
+            w.grid_forget()
+        if self.cfg["editor_split_layout"] == "Side-by-Side":
+            self.ed_area.grid_columnconfigure(0, weight=1, uniform="ed")
+            self.ed_area.grid_columnconfigure(1, weight=0, uniform="")
+            self.ed_area.grid_columnconfigure(2, weight=1, uniform="ed")
+            self.design_ed.grid(row=0, column=0, sticky="nsew")
+            self.ed_split.grid(row=0, column=1, sticky="ns")
+            self.tb_ed.grid(row=0, column=2, sticky="nsew")
+        else:
+            for c in range(3):
+                self.ed_area.grid_columnconfigure(c, weight=1 if c == 0 else 0, uniform="")
+            self._switch_tab(self.tab_shown, focus=False)
+        self._refresh_siblings()
+
+    def _switch_tab(self, which: str, focus: bool = True) -> None:
+        self.tab_shown = which
+        if self.cfg["editor_split_layout"] == "Side-by-Side":
+            return
+        show, hide = (self.tb_ed, self.design_ed) if which == "tb" else (self.design_ed, self.tb_ed)
+        hide.grid_forget()
+        show.grid(row=0, column=0, columnspan=3, sticky="nsew")
+        self.active_editor = show
+        if focus:
+            show.text.focus_set()
+
+    def _refresh_siblings(self) -> None:
+        if self.cfg["editor_split_layout"] == "Side-by-Side" or not self.module:
+            for ed in (self.design_ed, self.tb_ed):
+                if ed.sibling is not None:
+                    ed.set_sibling(None)
+            return
+        self.design_ed.set_sibling({"text": os.path.basename(self.tb_ed.path or ""), "role": "TESTBENCH",
+                                    "dirty": self.tb_ed.is_modified, "before": False, "command": lambda: self._switch_tab("tb")})
+        self.tb_ed.set_sibling({"text": os.path.basename(self.design_ed.path or ""), "role": "DESIGN",
+                                "dirty": self.design_ed.is_modified, "before": True, "command": lambda: self._switch_tab("design")})
+
+    def _show_editor(self, ed: VerilogCodeEditor) -> None:
+        if self.cfg["editor_split_layout"] != "Side-by-Side":
+            self._switch_tab("tb" if ed is self.tb_ed else "design")
+
+    # ================================================================== workspace
+    def choose_folder(self) -> None:
+        init = self.work_dir or Path.home()
+        d = filedialog.askdirectory(parent=self, title="Open Verilog workspace folder", initialdir=str(init))
+        if d:
+            self.open_workspace(Path(d))
+
+    def _open_recent(self, label: str) -> None:
+        self.recent_menu.set(RECENT_LABEL)
+        path = self._recent_map.get(label)
+        if path and Path(path).is_dir():
+            self.open_workspace(Path(path))
+        elif path:
+            messagebox.showwarning("Recent workspace", f"Folder no longer exists:\n{path}")
+
+    def _refresh_recent_menu(self) -> None:
+        self._recent_map = {}
+        for p in self.cfg["recent_workspaces"]:
+            label = Path(p).name or p
+            k = 2
+            while label in self._recent_map:
+                label = f"{Path(p).name} ({k})"
+                k += 1
+            self._recent_map[label] = p
+        self.recent_menu.configure(values=list(self._recent_map) or ["(none yet)"])
+        self.recent_menu.set(RECENT_LABEL)
+
+    def open_workspace(self, folder: Path) -> None:
+        if not self._confirm_discard():
+            return
+        self.work_dir = folder.resolve()
+        self.cfg.add_recent_workspace(self.work_dir)
+        self._refresh_recent_menu()
+        self.ws_label.configure(text=str(self.work_dir))
+        self.explorer_title.configure(text=f"EXPLORER: {self.work_dir.name.upper()}")
+        self.title(f"{self.work_dir.name} - {APP_NAME} {APP_VERSION}")
+        self.module = None
+        self._scan_workspace(force=True)
+        pick = self.cfg["last_module"] if self.cfg["last_module"] in self.modules else next(iter(self.modules), None)
+        if pick:
+            self.select_module(pick, confirm=False)
+        else:
+            self.design_ed.set_content("", None)
+            self.tb_ed.set_content("", None)
+            self.log(f"No *.v modules in {self.work_dir} - use '+ New .v' to create one.", "warn")
+        self.log(f"Workspace: {self.work_dir}", "head")
+
+    def _workspace_signature(self):
+        if not self.work_dir or not self.work_dir.is_dir():
+            return None
+        try:
+            return tuple(sorted((p.name, p.stat().st_mtime) for p in self.work_dir.glob("*.v")))
+        except OSError:
+            return None
+
+    def _scan_workspace(self, force: bool = False) -> bool:
+        sig = self._workspace_signature()
+        if not force and sig == self._ws_signature:
+            return False
+        self._ws_signature = sig
+        self.modules = {}
+        files = sorted(self.work_dir.glob("*.v"), key=lambda p: p.name.lower()) if self.work_dir else []
+        for f in files:
+            if f.stem.lower().endswith("_tb"):
+                continue
+            tb = f.with_name(f"{f.stem}_tb.v")
+            self.modules[f.stem] = {"design": f, "tb": tb if tb.is_file() else None}
+        self.ws_modules = scan_module_dir(self.work_dir, self._parse_cache) if self.work_dir else {}
+        self._render_module_list()
+        self._render_extra_files()
+        names = list(self.modules) or ["(no modules)"]
+        self.module_menu.configure(values=names)
+        self.module_menu.set(self.module or names[0])
+        return True
+
+    def _render_module_list(self) -> None:
+        for w in self.mod_list.winfo_children():
+            w.destroy()
+        self.sec_modules.set_count(len(self.modules))
+        for r, (name, info) in enumerate(self.modules.items()):
+            ready = info["tb"] is not None
+            active = name == self.module
+            bg = VS["selected"] if active else "transparent"
+            row = ctk.CTkFrame(self.mod_list, height=26, corner_radius=0, fg_color=bg, cursor="hand2")
+            row.grid(row=r, column=0, sticky="ew")
+            row.pack_propagate(False)
+            ctk.CTkFrame(row, width=2, corner_radius=0, fg_color=VS["accent"] if active else bg).pack(side="left", fill="y")
+            dot = ctk.CTkLabel(row, text="●", width=18, font=font(11), text_color=VS["ready_dot"] if ready else VS["warn_dot"])
+            dot.pack(side="left", padx=(10, 2))
+            lab = ctk.CTkLabel(row, text=name, anchor="w", font=font(13), text_color=VS["selected_fg"] if active else VS["text"])
+            lab.pack(side="left", fill="x", expand=True)
+            badge = ctk.CTkLabel(row, text=" Ready " if ready else " No TB ", height=16, corner_radius=8, font=font(10),
+                                 fg_color=VS["badge"] if ready else ("#F5E3B3", "#4D3B0F"),
+                                 text_color=VS["badge_fg"] if ready else ("#7A5A00", "#E9C46A"))
+            badge.pack(side="right", padx=8)
+            for w in (row, dot, lab, badge):
+                w.bind("<Button-1>", lambda e, n=name: self.select_module(n))
+                if not active:
+                    w.bind("<Enter>", lambda e, rw=row: rw.configure(fg_color=VS["hover"]))
+                    w.bind("<Leave>", lambda e, rw=row: rw.configure(fg_color="transparent"))
+
+    def _render_extra_files(self) -> None:
+        for w in self.extra_list.winfo_children():
+            w.destroy()
+        old = {k: v.get() for k, v in self.extra_vars.items()}
+        self.extra_vars = {}
+        if not self.work_dir:
+            self.sec_extra.set_count(0)
+            return
+        skip = {f"{self.module}.v", f"{self.module}_tb.v"} if self.module else set()
+        files = [p.name for p in sorted(self.work_dir.glob("*.v")) if p.name not in skip and not p.stem.lower().endswith("_tb")]
+        self.sec_extra.set_count(len(files))
+        if not files:
+            ctk.CTkLabel(self.extra_list, text="Other modules are found automatically through -y",
+                         text_color=VS["muted"], font=font(11), wraplength=220, justify="left").grid(row=0, column=0, sticky="w", padx=14)
+        for r, name in enumerate(files):
+            var = tk.BooleanVar(value=old.get(name, False))
+            self.extra_vars[name] = var
+            ctk.CTkCheckBox(self.extra_list, text=name, variable=var, checkbox_width=14, checkbox_height=14, corner_radius=2,
+                            border_width=1, text_color=VS["text"], font=font(12),
+                            command=self._update_cmd).grid(row=r, column=0, sticky="w", padx=14, pady=2)
+
+    def _extra_files(self) -> list[str]:
+        return [n for n, v in self.extra_vars.items() if v.get()]
+
+    def _module_selected(self, name: str) -> None:
+        if name in self.modules and name != self.module:
+            self.select_module(name)
+
+    def select_module(self, name: str, confirm: bool = True) -> None:
+        if confirm and not self._confirm_discard():
+            self.module_menu.set(self.module or "(no modules)")
+            return
+        info = self.modules.get(name)
+        if not info:
+            return
+        self.module = name
+        self.cfg.update(last_module=name)
+        self.module_menu.set(name)
+        self._load_editor(self.design_ed, info["design"])
+        tb_path = info["design"].with_name(f"{name}_tb.v")
+        if tb_path.is_file():
+            self._load_editor(self.tb_ed, tb_path)
+            self.tb_ed.set_missing(False)
+        else:
+            self.tb_ed.set_content("", str(tb_path))
+            self.tb_ed.set_missing(True)
+        self.tab_shown = "design"
+        self._layout_editors()
+        self._render_module_list()
+        self._render_extra_files()
+        self.run_diags = []
+        self.truth.clear()
+        self.wave.clear()
+        self.last_vcd = None
+        self._set_status("ready", "⚡ Ready")
+        self._update_cmd()
+        self._refresh_status_items()
+        self.run_lint()
+
+    def _load_editor(self, ed: VerilogCodeEditor, path: Path) -> None:
+        try:
+            text, nl = read_source(path)
+        except OSError as exc:
+            self.log(f"Cannot read {path}: {exc}", "err")
+            return
+        ed.newline = nl
+        ed.set_content(text, str(path))
+        self.known_mtime[os.path.normcase(str(path))] = path.stat().st_mtime
+
+    def _confirm_discard(self) -> bool:
+        dirty = [ed for ed in (self.design_ed, self.tb_ed) if ed.is_modified and ed.path]
+        if not dirty:
+            return True
+        names = ", ".join(os.path.basename(ed.path) for ed in dirty)
+        ans = messagebox.askyesnocancel("Unsaved changes", f"Save changes to {names}?", parent=self)
+        if ans is None:
+            return False
+        if ans:
+            for ed in dirty:
+                self.save_editor(ed, lint=False)
+        return True
+
+    # ================================================================== saving
+    def save_editor(self, ed: VerilogCodeEditor, lint: bool = True, quiet: bool = False) -> bool:
+        if not ed.path:
+            return False
+        p = Path(ed.path)
+        text = ed.get_content()
+        if not p.exists() and not text.strip():
+            return False
+        try:
+            with open(p, "w", encoding="utf-8", newline=getattr(ed, "newline", "\n")) as fh:
+                fh.write(text)
+        except OSError as exc:
+            messagebox.showerror("Save failed", f"Cannot write {p}:\n{exc}", parent=self)
+            return False
+        self.known_mtime[os.path.normcase(str(p))] = p.stat().st_mtime
+        ed.mark_saved()
+        if ed is self.tb_ed and ed.missing:
+            ed.set_missing(False)
+        if not quiet:
+            self.st_msg.configure(text=f"Saved {p.name}")
+        if self.module and p.name == f"{self.module}_tb.v" and self.modules.get(self.module, {}).get("tb") is None:
+            self._scan_workspace(force=True)
+        if lint:
+            self.run_lint()
+        return True
+
+    def save_all(self, quiet: bool = False) -> None:
+        for ed in (self.design_ed, self.tb_ed):
+            if ed.is_modified:
+                self.save_editor(ed, lint=False, quiet=quiet)
+        self.run_lint()
+
+    def _on_editor_modified(self, ed: VerilogCodeEditor, modified: bool) -> None:
+        any_mod = self.design_ed.is_modified or self.tb_ed.is_modified
+        self.st_saved.configure(text="● Modified" if any_mod else "✔ Saved")
+        self._refresh_siblings()
+        if modified and self.cfg["enable_course_linter"]:
+            if self._lint_job:
+                self.after_cancel(self._lint_job)
+            self._lint_job = self.after(900, self.run_lint)
+
+    def _on_cursor(self, ed: VerilogCodeEditor, line: int, col: int, msg: str | None) -> None:
+        self.st_pos.configure(text=f"Ln {line}, Col {col}")
+        if msg:
+            self.st_msg.configure(text=msg.splitlines()[0][:160])
+
+    def _on_editor_focus(self, ed: VerilogCodeEditor) -> None:
+        self.active_editor = ed
+
+    # ================================================================== library
+    def _load_library(self) -> None:
+        lib = Path(self.cfg["lib_dir"])
+        self.lib_modules = scan_module_dir(lib, self._parse_cache) if lib.is_dir() else {}
+        if lib.is_dir():
+            self.lib_label.configure(text=f"{lib}  ·  {len(self.lib_modules)} modules")
+            self.library_title.configure(text=f"LIBRARY: {lib.parent.name.upper()}\\{lib.name.upper()}")
+            self.lib_search.configure(placeholder_text=f"🔍 Filter {len(self.lib_modules)} library modules…")
+        self._render_library()
+
+    def _render_library(self) -> None:
+        for w in self.lib_list.winfo_children():
+            w.destroy()
+        q = self.lib_search.get().strip().lower()
+        for r, name in enumerate(n for n in sorted(self.lib_modules, key=str.lower) if q in n.lower()):
+            m = self.lib_modules[name]
+            sig = ", ".join(p["name"] for p in m["ports"])
+            sel = self._lib_selected is m
+            ctk.CTkButton(self.lib_list, text=f"{name}  ({sig})", anchor="w", height=24, corner_radius=0, border_width=0,
+                          fg_color=VS["selected"] if sel else "transparent", hover_color=VS["hover"],
+                          text_color=VS["selected_fg"] if sel else VS["text"], font=font(12),
+                          command=lambda mm=m: self._show_lib(mm)).grid(row=r, column=0, sticky="ew")
+
+    def _show_lib(self, m: dict) -> None:
+        self._lib_selected = m
+        self.lib_detail.configure(state="normal")
+        self.lib_detail.delete("1.0", "end")
+        self.lib_detail.insert("1.0", describe_ports(m) + "\n\n" + instantiation_template(m, "u1"))
+        self.lib_detail.configure(state="disabled")
+        self._render_library()
+
+    def _copy_inst(self) -> None:
+        if self._lib_selected:
+            self.clipboard_clear()
+            self.clipboard_append(instantiation_template(self._lib_selected, "u1"))
+            self.st_msg.configure(text=f"Copied {self._lib_selected['module_name']} instantiation")
+
+    def _insert_inst(self) -> None:
+        if self._lib_selected and self.active_editor:
+            self.active_editor.insert_snippet(instantiation_template(self._lib_selected, "u1").rstrip("\n"))
+
+    def _insert_snippet(self, name: str) -> None:
+        self.snippet_menu.set(SNIPPET_LABEL)
+        if self.active_editor:
+            self._show_editor(self.active_editor)
+            self.active_editor.insert_snippet(SNIPPETS[name])
+
+    # ================================================================== linting & problems
+    def _known_modules(self) -> dict[str, dict]:
+        known = dict(self.lib_modules)
+        if self.work_dir:
+            self.ws_modules = scan_module_dir(self.work_dir, self._parse_cache)
+            known.update(self.ws_modules)
+        return known
+
+    def run_lint(self, show: bool = False) -> list[dict]:
+        self._lint_job = None
+        self.lint_diags = []
+        if self.cfg["enable_course_linter"] and self.module:
+            known = self._known_modules()
+            for ed in (self.design_ed, self.tb_ed):
+                if ed.path and (Path(ed.path).exists() or ed.get_content().strip()):
+                    self.lint_diags += run_course_linter(ed.path, known, self.cfg["strict_gate_level_mode"], text=ed.get_content())
+        self._refresh_problems()
+        if show:
+            self.panel.set("problems")
+            n = len([d for d in self.lint_diags if d["severity"] != "info"])
+            self.st_msg.configure(text=f"Linter: {n} issue(s)" if self.cfg["enable_course_linter"] else "Linter disabled in settings")
+        return self.lint_diags
+
+    def _refresh_problems(self) -> None:
+        diags = self.run_diags + self.lint_diags
+        self.prob_tree.delete(*self.prob_tree.get_children())
+        self.diag_rows = {}
+        order = {"error": 0, "warning": 1, "info": 2}
+        for k, d in enumerate(sorted(diags, key=lambda d: (order.get(d["severity"], 3), d["file"], d["line"]))):
+            iid = f"d{k}"
+            fname = os.path.basename(d["file"]) if d["file"] else "-"
+            self.prob_tree.insert("", "end", iid=iid, tags=(d["severity"],),
+                                  values=(SEV_ICON.get(d["severity"], d["severity"]), fname, d["line"] or "", d["message"], d["source"]))
+            self.diag_rows[iid] = d
+        self.panel.set_badge("problems", sum(1 for d in diags if d["severity"] in ("error", "warning")))
+        for ed in (self.design_ed, self.tb_ed):
+            ed.clear_diagnostic_marks()
+            if not ed.path:
+                continue
+            key = os.path.normcase(os.path.abspath(ed.path))
+            for d in diags:
+                if d["line"] and d["file"] and os.path.normcase(os.path.abspath(d["file"])) == key:
+                    if d["severity"] == "error":
+                        ed.highlight_error_line(d["line"], d["message"])
+                    elif d["severity"] == "warning":
+                        ed.highlight_warning_line(d["line"], d["message"])
+
+    def _on_problem_click(self, _e=None) -> None:
+        sel = self.prob_tree.selection()
+        if sel and sel[0] in self.diag_rows:
+            self.jump_to(self.diag_rows[sel[0]])
+
+    def jump_to(self, d: dict) -> None:
+        if not d.get("file"):
+            return
+        key = os.path.normcase(os.path.abspath(d["file"]))
+        for ed in (self.design_ed, self.tb_ed):
+            if ed.path and os.path.normcase(os.path.abspath(ed.path)) == key:
+                self._show_editor(ed)
+                if d["line"]:
+                    ed.goto_line(d["line"], d.get("col") or 0)
+                return
+        p = Path(d["file"])
+        if p.is_file():
+            npp = self.cfg["notepad_pp_path"]
+            if Path(npp).is_file():
+                subprocess.Popen([npp, f"-n{d['line'] or 1}", str(p)], creationflags=NO_WINDOW)
+            elif IS_WINDOWS:
+                os.startfile(str(p))  # type: ignore[attr-defined]
+
+    # ================================================================== command preview
+    def _update_cmd(self) -> None:
+        if not self.module or not self.work_dir:
+            return
+        extra = self._extra_files()
+        if self.cmd_mode == "Actual":
+            self.cmd_var.set(self.runner.display_cmd(self.work_dir, self.module, extra))
+        else:
+            self.cmd_var.set(self.runner.course_baseline_cmd(self.module))
+        body = (f"# compile\n{format_cmd(self.runner.build_compile_cmd(self.work_dir, self.module, extra))}\n\n"
+                f"# simulate\n{format_cmd(self.runner.build_sim_cmd(self.module))}\n\n"
+                f"# course baseline\n{self.runner.course_baseline_cmd(self.module)}")
+        self.run_cmd_box.configure(state="normal")
+        self.run_cmd_box.delete("1.0", "end")
+        self.run_cmd_box.insert("1.0", body)
+        self.run_cmd_box.configure(state="disabled")
+
+    def _cmd_mode(self, mode: str) -> None:
+        self.cmd_mode = "Actual" if mode == "Actual" else "Course"
+        self._update_cmd()
+
+    def _copy_cmd(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self.cmd_var.get())
+        self.st_msg.configure(text="Command copied - paste it into cmd.exe inside the workspace folder")
+
+    # ================================================================== run pipeline
+    def _set_running(self, running: bool) -> None:
+        if running:
+            self.run_btn.configure(text="⟳  Running…", state="disabled")
+            self.stop_btn.configure(state="normal", fg_color=STOP_RED)
+        else:
+            self.run_btn.configure(text="▶  Run (F5)", state="normal")
+            self.stop_btn.configure(state="disabled", fg_color=STOP_IDLE)
+
+    def run_pipeline(self, reason: str = "manual") -> None:
+        if self.runner.is_running():
+            return
+        if not self.module or not self.work_dir:
+            messagebox.showinfo(APP_NAME, "Open a workspace folder and select a module first.", parent=self)
+            return
+        if self.cfg["auto_save_before_run"]:
+            self.save_all(quiet=True)
+        elif self.design_ed.is_modified or self.tb_ed.is_modified:
+            self.log("Note: unsaved editor changes are NOT compiled (auto-save before run is off).", "warn")
+        tb = self.work_dir / f"{self.module}_tb.v"
+        if not tb.is_file():
+            self.log(f"✖ {tb.name} does not exist - click 🧪 Gen _tb.v first.", "err")
+            self.panel.set("console")
+            return
+        self._clear_console()
+        self.run_diags = []
+        self.run_lint()
+        self._update_cmd()
+        mock = not self.cfg.toolchain_available()
+        info = parse_verilog_module(self.work_dir / f"{self.module}.v")
+        self._port_widths = {p["name"]: p["bits"] for p in info.get("ports", []) if isinstance(p.get("bits"), int)}
+        outputs = {p["name"] for p in info.get("ports", []) if p["direction"] != "input"}
+        errs = [d for d in self.lint_diags if d["severity"] == "error"]
+        self.log(f"━━ {time.strftime('%H:%M:%S')}  {self.module}  ({reason})" + ("  [DEMO MODE]" if mock else ""), "head")
+        if errs:
+            self.log(f"Linter found {len(errs)} error(s) - compiling anyway so you see iverilog's view too.", "warn")
+        self.runner.start(self.work_dir, self.module, self._extra_files(), mock=mock, outputs=outputs)
+        self._set_running(True)
+        self._set_status("running", "⟳ Running…")
+
+    def stop_run(self) -> None:
+        self.runner.stop()
+
+    def _poll_events(self) -> None:
+        if self._probe_result:
+            self._tool_text = f"{self._probe_result} ({len(self.lib_modules)} lib modules)"
+            self._probe_result = ""
+            self._refresh_status_items()
+        while True:
+            try:
+                ev = self.events.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._handle_event(ev)
+            except Exception as exc:      # a UI bug must never leave the Run button stuck
+                self.log(f"✖ Internal UI error while handling {ev.kind}: {exc!r}", "err")
+                if ev.kind == "FINISHED":
+                    self._set_running(False)
+        self.after(40, self._poll_events)
+
+    def _handle_event(self, ev) -> None:
+        p = ev.payload
+        if ev.kind == "STAGE_START":
+            self.log(f"$ {p['cmd']}", "cmd")
+            self._set_status("running", "⟳ Compiling…" if p["stage"] == "compile" else "⟳ Simulating…")
+        elif ev.kind == "COMPILE_DONE":
+            for line in (p.get("stderr", "") + "\n" + p.get("stdout", "")).splitlines():
+                if line.strip():
+                    self.log(line, self._line_tag(line))
+            self.run_diags = list(p.get("diagnostics", []))
+            self._refresh_problems()
+            if p["ok"]:
+                warn = sum(d["severity"] == "warning" for d in self.run_diags)
+                self.log(f"✔ Compiled in {p.get('duration', 0):.2f}s" + (f" with {warn} warning(s)" if warn else ""), "ok")
+            else:
+                n = sum(d["severity"] == "error" for d in self.run_diags) or 1
+                self.log(f"✖ Compilation failed (exit code {p.get('rc')}, {n} error(s)) - binary not executed.", "err")
+                self._set_status("error", f"⊗ Compile failed ({n} error{'s' if n != 1 else ''})")
+                self.panel.set("problems")
+                first = next((d for d in self.run_diags if d["severity"] == "error" and d["line"]), None)
+                if first:
+                    self.jump_to(first)
+        elif ev.kind in ("SIM_DONE", "TIMEOUT"):
+            self._show_sim(p, timed_out=ev.kind == "TIMEOUT")
+        elif ev.kind == "ERROR":
+            self.log(f"✖ {p.get('message')}", "err")
+            if "stdout" in p:
+                self._show_sim(p, timed_out=False, stopped=True)
+            else:
+                self._set_status("error", "⊗ Error")
+        elif ev.kind == "FINISHED":
+            self._set_running(False)
+            if self._status_state == "running":
+                self._set_status("ready", "⚡ Ready")
+            self.st_time.configure(text=f"⏱ Pipeline: {p.get('duration', 0):.2f}s")
+
+    def _show_sim(self, p: dict, timed_out: bool, stopped: bool = False) -> None:
+        for line in p.get("stdout", "").splitlines():
+            self.log(line, self._line_tag(line))
+        for line in p.get("stderr", "").splitlines():
+            if line.strip():
+                self.log(line, "err")
+        if p.get("diagnostics"):
+            self.run_diags += p["diagnostics"]
+            self._refresh_problems()
+        table = p.get("table") or {"columns": [], "rows": [], "counts": {}}
+        self.truth.set_data(table, self._port_widths)
+        self.last_vcd = p.get("vcd")
+        if self.last_vcd:
+            try:
+                self.wave.set_vcd(parse_vcd_file(self.last_vcd, max_steps=4096))
+            except (OSError, ValueError) as exc:
+                self.log(f"Could not read VCD: {exc}", "warn")
+                self.last_vcd = None
+        if not self.last_vcd:
+            if table["rows"]:
+                self.wave.set_from_table(table["columns"], table["rows"])
+            else:
+                self.wave.clear("No VCD and no truth-table rows to draw")
+        counts = table.get("counts", {})
+        rows, xz, fail = len(table["rows"]), counts.get(STATUS_XZ, 0), counts.get(STATUS_FAIL, 0) + len(table.get("fail_messages", []))
+        if timed_out:
+            t = p.get("timeout", self.cfg["sim_timeout_sec"])
+            self.log(f"⏱ Simulation killed after {t:.1f}s timeout - the testbench probably has no $finish, waits forever, "
+                     f"or has a zero-delay loop (e.g. 'always a = ~a;'). Process tree terminated.", "err")
+            self.run_diags.append({"file": str(self.work_dir / f"{self.module}_tb.v"), "line": 0, "col": 0, "severity": "error",
+                                   "code": "timeout", "source": "runner", "message": f"Simulation timed out after {t:.1f}s (no $finish / infinite loop?)"})
+            self._refresh_problems()
+            self._set_status("error", f"⏱ Timeout ({t:.1f}s)")
+            self.panel.set("console")
+            return
+        if stopped:
+            self._set_status("ready", "■ Stopped")
+            return
+        if p.get("mock"):
+            self.log("(demo mode) results computed by the built-in Python gate-level simulator", "dim")
+        ok = fail == 0 and xz == 0 and (p.get("rc") in (0, None))
+        summary = f"{rows} rows · {xz} x/z · {fail} FAIL"
+        self.log(("✔ Simulation OK - " if ok else "⚠ Simulation finished - ") + summary + f"  ({p.get('duration', 0):.2f}s)",
+                 "ok" if ok else "warn")
+        self._set_status("ready", ("✔ " if ok else "⚠ ") + summary)
+        self.panel.set("table" if rows else "console")
+
+    @staticmethod
+    def _line_tag(line: str) -> str | None:
+        low = line.lower()
+        if re.search(r"\b(error|fail\w*|mismatch|syntax error|i give up)\b", low):
+            return "err"
+        if "warning" in low or re.search(r"=\s*[01]*[xz]", low):
+            return "warn"
+        if re.search(r"\b(pass(ed)?|ok)\b", low):
+            return "ok"
+        if low.startswith(("vcd info", "$finish", "[demo]")) or "$finish called" in low:
+            return "dim"
+        return None
+
+    # ================================================================== console
+    def log(self, text: str, tag: str | None = None) -> None:
+        self.console.configure(state="normal")
+        self.console.insert("end", text + "\n", tag)
+        self.console.see("end")
+        self.console.configure(state="disabled")
+
+    def _clear_console(self) -> None:
+        self.console.configure(state="normal")
+        self.console.delete("1.0", "end")
+        self.console.configure(state="disabled")
+
+    def _on_btab(self) -> None:
+        if self.panel.get() == "wave":
+            self.after(30, self.wave.render)
+
+    # ================================================================== tools
+    def generate_tb(self) -> None:
+        if not self.module or not self.work_dir:
+            return
+        design = self.work_dir / f"{self.module}.v"
+        info = parse_verilog_module(design, self.design_ed.get_content())
+        if not info.get("module_name"):
+            messagebox.showerror("Generate testbench", f"Cannot parse {design.name}: {info.get('error')}", parent=self)
+            return
+        tb = self.work_dir / f"{self.module}_tb.v"
+        if (tb.is_file() and tb.read_text(encoding="utf-8", errors="replace").strip()) or self.tb_ed.get_content().strip():
+            if not messagebox.askyesno("Generate testbench", f"{tb.name} already has content.\nOverwrite it with a fresh skeleton?", parent=self):
+                return
+        if info["module_name"] != self.module:
+            self.log(f"Note: file {design.name} declares module '{info['module_name']}' - the testbench instantiates that name.", "warn")
+        tb.write_text(generate_testbench_skeleton(info), encoding="utf-8")
+        self._scan_workspace(force=True)
+        self._load_editor(self.tb_ed, tb)
+        self.tb_ed.set_missing(False)
+        self._render_module_list()
+        self._show_editor(self.tb_ed)
+        self.run_lint()
+        ins = sum(p["bits"] or 1 for p in info["ports"] if p["direction"] == "input")
+        self.log(f"🧪 Generated {tb.name} ({'exhaustive loop over' if ins <= 7 else '8 corner-case vectors for'} {ins} input bit(s)). Press F5 to run.", "ok")
+
+    def new_module(self) -> None:
+        if not self.work_dir:
+            messagebox.showinfo(APP_NAME, "Open a workspace folder first.", parent=self)
+            return
+        name = ctk.CTkInputDialog(text="New module name (also the file name):", title="New Module").get_input()
+        if not name:
+            return
+        name = name.strip()
+        if not re.fullmatch(r"[A-Za-z_]\w*", name):
+            messagebox.showerror("New Module", "Use a Verilog identifier: letters, digits, '_' (not starting with a digit).", parent=self)
+            return
+        path = self.work_dir / f"{name}.v"
+        if path.exists() or any(n.lower() == name.lower() for n in self.modules):
+            messagebox.showerror("New Module", f"{path.name} (or a case-variant) already exists.", parent=self)
+            return
+        if not self._confirm_discard():
+            return
+        path.write_text(new_module_template(name), encoding="utf-8")
+        self._scan_workspace(force=True)
+        self.select_module(name, confirm=False)
+        self.log(f"Created {path.name}. Edit the ports/gates, then click 🧪 Gen _tb.v.", "ok")
+
+    def open_in_npp(self) -> None:
+        if not self.module or not self.work_dir:
+            return
+        self.save_all(quiet=True)
+        files = [str(self.work_dir / f"{self.module}.v")]
+        tb = self.work_dir / f"{self.module}_tb.v"
+        if tb.is_file():
+            files.append(str(tb))
+        npp = self.cfg["notepad_pp_path"]
+        try:
+            if Path(npp).is_file():
+                subprocess.Popen([npp, *files], creationflags=NO_WINDOW)
+            elif IS_WINDOWS:
+                for f in files:
+                    os.startfile(f)  # type: ignore[attr-defined]
+            else:
+                raise OSError("Notepad++ not found")
+        except OSError as exc:
+            messagebox.showerror("Open in Notepad++", str(exc), parent=self)
+            return
+        if not self.cfg["live_sync_enabled"]:
+            self.cfg.update(live_sync_enabled=True)
+            self.log("⚡ Live Notepad++ Sync enabled - save in Notepad++ (Ctrl+S) and VeriFlow re-runs automatically.", "ok")
+
+    def clean(self) -> None:
+        if not self.work_dir:
+            return
+        removed = clean_binaries(self.work_dir)
+        self.log(f"🧹 Removed {len(removed)} compiled vvp binar{'y' if len(removed) == 1 else 'ies'}: {', '.join(removed) or '-'}", "ok")
+        self.st_msg.configure(text=f"Cleaned {len(removed)} binaries")
+
+    def open_gtkwave(self) -> None:
+        gtk = self.cfg["gtkwave_path"]
+        if not self.last_vcd:
+            messagebox.showinfo("GTKWave", "No .vcd file from the last run. Add $dumpfile/$dumpvars to the testbench "
+                                           "(Gen _tb.v does this) and press F5.", parent=self)
+            return
+        if not Path(gtk).is_file():
+            messagebox.showwarning("GTKWave", f"gtkwave.exe not found at\n{gtk}\nSet it in ⚙ Settings → Compiler & Toolchain.", parent=self)
+            return
+        subprocess.Popen([gtk, self.last_vcd], cwd=str(self.work_dir), creationflags=NO_WINDOW)
+
+    # ================================================================== live sync
+    def _restart_sync(self) -> None:
+        if self._sync_job:
+            self.after_cancel(self._sync_job)
+            self._sync_job = None
+        if self.cfg["live_sync_enabled"]:
+            self._sync_job = self.after(int(self.cfg["external_poll_interval_ms"]), self._sync_tick)
+
+    def _sync_tick(self) -> None:
+        self._sync_job = None
+        try:
+            self.check_external_changes(autorun=True)
+            if self._scan_workspace():
+                self.log("↻ Workspace files changed - module list refreshed.", "dim")
+        finally:
+            if self.cfg["live_sync_enabled"]:
+                self._sync_job = self.after(int(self.cfg["external_poll_interval_ms"]), self._sync_tick)
+
+    def check_external_changes(self, autorun: bool) -> bool:
+        changed = []
+        for ed in (self.design_ed, self.tb_ed):
+            if not ed.path:
+                continue
+            p = Path(ed.path)
+            key = os.path.normcase(str(p))
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if self.known_mtime.get(key) == m:
+                continue
+            if time.time() - m < 0.15:          # file may still be being written - check again next tick
+                continue
+            self.known_mtime[key] = m
+            try:
+                text, nl = read_source(p)
+            except OSError:
+                continue
+            if text == ed.get_content():
+                continue
+            if ed.is_modified:
+                self.log(f"⚠ {p.name} changed on disk but has unsaved edits here - not reloaded (save or revert first).", "warn")
+                continue
+            ed.newline = nl
+            ed.set_content(text, keep_view=True)
+            if ed is self.tb_ed and ed.missing:
+                ed.set_missing(False)
+            changed.append(p.name)
+        if changed:
+            self.log(f"↻ Reloaded external change: {', '.join(changed)}", "head")
+            self.run_lint()
+            if autorun and self.cfg["auto_run_on_external_save"] and not self.runner.is_running():
+                self.run_pipeline(reason="external save")
+        return bool(changed)
+
+    def _on_app_focus_in(self, _e=None) -> None:
+        if time.time() - self._last_focus_check < 1.0 or self.cfg["live_sync_enabled"]:
+            return
+        self._last_focus_check = time.time()
+        self.check_external_changes(autorun=False)
+        self._scan_workspace()
+
+    def _on_app_focus_out(self, _e=None) -> None:
+        if self.cfg["auto_save_on_focus_loss"]:
+            self.after(250, self._autosave_if_away)
+
+    def _autosave_if_away(self) -> None:
+        try:
+            away = self.focus_displayof() is None
+        except (KeyError, tk.TclError):
+            away = True
+        if away and (self.design_ed.is_modified or self.tb_ed.is_modified):
+            self.save_all(quiet=True)
+            self.st_msg.configure(text="Auto-saved on focus loss")
+
+    # ================================================================== shortcuts / close
+    def _bind_shortcuts(self) -> None:
+        self.bind_all("<F5>", lambda e: (self.run_pipeline(), "break")[1])
+        self.bind_all("<Shift-F5>", lambda e: self.stop_run())
+        self.bind_all("<F7>", lambda e: self.run_lint(show=True))
+        self.bind("<Control-KeyPress>", self._on_ctrl)
+        self.bind("<FocusIn>", self._on_app_focus_in)
+        self.bind("<FocusOut>", self._on_app_focus_out)
+
+    def _on_ctrl(self, e):
+        code = e.keycode if IS_WINDOWS else None
+        ks = e.keysym.lower()
+        if code == 79 or ks == "o":
+            self.choose_folder()
+        elif code == 78 or ks == "n":
+            self.new_module()
+        elif code == 66 or ks == "b":
+            self.toggle_sidebar()
+        elif code == 83 or ks == "s":
+            self.save_all()
+        elif code == 188 or ks == "comma":
+            self.open_settings()
+        elif code in (187, 107) or ks in ("equal", "plus"):
+            self.zoom(1)
+        elif code in (189, 109) or ks == "minus":
+            self.zoom(-1)
+        elif code in (48, 96) or ks == "0":
+            self.zoom(0)
+        else:
+            return None
+        return "break"
+
+    def _on_close(self) -> None:
+        if not self._confirm_discard():
+            return
+        self.runner.stop()
+        if self.state() == "normal":
+            self.cfg.update(window_geometry=self.geometry())
+        self.destroy()
+
+
+def main() -> None:
+    if IS_WINDOWS:
+        try:   # DPI awareness is handled by customtkinter; this only groups the taskbar icon
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VeriFlow.Studio")
+        except (AttributeError, OSError):
+            pass
+    app = VeriFlowApp()
+    if len(sys.argv) > 1 and Path(sys.argv[1]).is_dir():
+        app.after(200, lambda: app.open_workspace(Path(sys.argv[1])))
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

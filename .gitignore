@@ -1,0 +1,33 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ---------------------------------------------------------------- PyInstaller / packaging
+build/
+dist/
+*.spec
+
+# ---------------------------------------------------------------- Verilog / simulation artifacts
+*.vcd
+*.vvp
+*.out
+a.out
+*.lxt
+*.lxt2
+*.fst
+# iverilog -o<Module> writes an extensionless vvp image next to the sources:
+# ignore everything in the demo project except the Verilog sources themselves
+sample_project/*
+!sample_project/*.v
+
+# ---------------------------------------------------------------- local user state
+.veriflow_studio.json
+config.local.json
+config.json
+.DS_Store
+Thumbs.db
