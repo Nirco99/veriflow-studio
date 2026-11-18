@@ -54,7 +54,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sidebar_visible": True,
     "sidebar_view": "explorer",
     "ui_revision": 0,
+    # --- global Verilog package manager ("import once, resolve anywhere")
+    "global_packages_dir": str(Path.home() / ".veriflow_studio" / "packages"),
+    "library_packages": [
+        {"name": "Course Built-in Library (compstruct\\lib)", "path": "C:\\iverilog\\compstruct\\lib",
+         "enabled": True, "builtin": True, "kind": "builtin"},
+    ],
+    "auto_resolve_packages_with_l_flag": True,
 }
+BUILTIN_PACKAGE_NAME = "Course Built-in Library (compstruct\\lib)"
 
 # Allowed values / numeric clamps, used to sanitise a hand-edited or stale config.json.
 CHOICES: dict[str, tuple] = {
@@ -238,7 +246,28 @@ class ConfigManager:
             pass
 
     @staticmethod
+    def _sanitize_packages(value: Any) -> list[dict]:
+        """library_packages: keep well-formed entries, exactly one built-in entry, unique names."""
+        out, seen = [], set()
+        for item in value if isinstance(value, list) else []:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("path"):
+                continue
+            kind = str(item.get("kind") or ("builtin" if item.get("builtin") else "linked"))
+            if kind not in ("builtin", "vault", "linked") or str(item["name"]) in seen:
+                continue
+            if kind == "builtin" and any(p["kind"] == "builtin" for p in out):
+                continue
+            seen.add(str(item["name"]))
+            out.append({"name": str(item["name"]), "path": str(item["path"]), "enabled": bool(item.get("enabled", True)),
+                        "builtin": kind == "builtin", "kind": kind})
+        if not any(p["kind"] == "builtin" for p in out):
+            out.insert(0, copy.deepcopy(DEFAULT_CONFIG["library_packages"][0]))
+        return out
+
+    @staticmethod
     def _sanitize(key: str, value: Any) -> Any:
+        if key == "library_packages":
+            return ConfigManager._sanitize_packages(value)
         default = DEFAULT_CONFIG[key]
         try:
             if isinstance(default, bool):
@@ -298,7 +327,8 @@ class ConfigManager:
         self._listeners.append(callback)
 
     def reset(self, keys: list[str] | None = None) -> set[str]:
-        keep = {"last_workspace_dir", "recent_workspaces", "last_module", "window_geometry"}
+        keep = {"last_workspace_dir", "recent_workspaces", "last_module", "window_geometry",
+                "library_packages", "global_packages_dir"}      # a settings reset never forgets imported packages
         keys = keys or [k for k in DEFAULT_CONFIG if k not in keep]
         return self.update(**{k: copy.deepcopy(DEFAULT_CONFIG[k]) for k in keys})
 
@@ -320,3 +350,12 @@ class ConfigManager:
     def toolchain_available(self) -> bool:
         st = self.toolchain_status()
         return st["iverilog"] and st["vvp"]
+
+    def get_all_enabled_library_dirs(self) -> list[Path]:
+        """Every enabled package folder that exists (the built-in entry always follows `lib_dir`)."""
+        out = []
+        for p in self.data["library_packages"]:
+            path = Path(self.data["lib_dir"]) if p["kind"] == "builtin" else Path(p["path"])
+            if p["enabled"] and path.is_dir() and all(os.path.normcase(str(path)) != os.path.normcase(str(o)) for o in out):
+                out.append(path)
+        return out

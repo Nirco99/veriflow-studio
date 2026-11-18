@@ -378,6 +378,8 @@ class VerilogRunner:
 
     def __init__(self, config, events: queue.Queue | None = None):
         self.config = config
+        self.package_manager = None          # set by the app: global -y / -l package resolution
+        self.last_resolution: dict | None = None
         self.events: queue.Queue = events or queue.Queue()
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -386,13 +388,38 @@ class VerilogRunner:
 
     # ---- command construction
     def build_compile_cmd(self, work_dir: Path | str, module: str, extra_files: list[str] | tuple = ()) -> list[str]:
+        """iverilog command line. With a package manager attached: -y for the workspace (first, so the student's
+        own modules win) and every enabled package folder, plus -l for package files -y cannot resolve."""
         c = self.config
-        cmd = [c["iverilog_path"], c["std_flag"], f"-o{module}", "-y", c["lib_dir"]]
+        cmd = [c["iverilog_path"], c["std_flag"], f"-o{module}"]
+        y_dirs: list[str] = []
+
+        def add_y(d) -> None:
+            if d and all(os.path.normcase(str(d)) != os.path.normcase(x) for x in y_dirs):
+                y_dirs.append(str(d))
+        pm, res = self.package_manager, None
         if c["include_workdir_as_ylib"]:
-            cmd += ["-y", str(work_dir)]
+            add_y(work_dir)
+        if pm is None:
+            add_y(c["lib_dir"])
+        else:
+            for d in c.get_all_enabled_library_dirs():
+                add_y(d)
+            if c["auto_resolve_packages_with_l_flag"]:
+                try:
+                    res = pm.resolve(work_dir, module, extra_files)
+                except Exception as exc:        # resolution must never block a plain compile
+                    res = {"y_dirs": [], "l_files": [], "missing": [], "notes": [f"package resolution failed: {exc}"]}
+                for d in res["y_dirs"]:
+                    add_y(d)
+        for d in y_dirs:
+            cmd += ["-y", d]
         if c["enable_wall_warnings"]:
             cmd += ["-Wall", "-Winfloop"]
+        for lf in (res or {}).get("l_files", []):
+            cmd += ["-l", lf]              # must precede the source files (iverilog rejects -l after them)
         cmd += [f"{module}.v", f"{module}_tb.v", *[str(f) for f in extra_files]]
+        self.last_resolution = res
         return cmd
 
     def build_sim_cmd(self, module: str) -> list[str]:
@@ -495,7 +522,7 @@ class VerilogRunner:
                 return
         # Step 2 - compile
         cmd = self.build_compile_cmd(work_dir, module, extra)
-        self._emit("STAGE_START", stage="compile", cmd=format_cmd(cmd))
+        self._emit("STAGE_START", stage="compile", cmd=format_cmd(cmd), resolution=self.last_resolution)
         t0 = time.time()
         try:
             rc, out, err, to = self._exec(cmd, work_dir, COMPILE_TIMEOUT_SEC)

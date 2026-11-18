@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -27,6 +28,7 @@ from ui_components import (SNIPPETS, ActivityBar, MiniWaveformViewer, PanelTabs,
 from verilog_parser import (describe_ports, generate_testbench_skeleton, instantiation_template, new_module_template,
                             parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
 from verilog_runner import NO_WINDOW, STATUS_FAIL, STATUS_XZ, VerilogRunner, clean_binaries, format_cmd
+from package_manager import DEFAULT_IMPORT_PACKAGE, PackageManager
 
 IS_WINDOWS = os.name == "nt"
 LAYOUT_LABELS = {"Side-by-Side": "Side-by-Side Split (.v + _tb.v)", "Tabbed": "Tabbed View"}
@@ -74,8 +76,9 @@ class SettingsDialog(ctk.CTkToplevel):
                             segmented_button_unselected_color=("#F3F3F3", "#2D2D2D"),
                             segmented_button_unselected_hover_color=VS["hover"], text_color=("#1F1F1F", "#E0E0E0"))
         tv.grid(row=0, column=0, sticky="nsew", padx=12, pady=(8, 4))
-        t1, t2, t3, t4 = (tv.add(n) for n in ("Appearance & Font", "Editor Behavior", "Compiler & Toolchain", "Linter & Sync"))
-        for t in (t1, t2, t3, t4):
+        t1, t2, t3, t4, t5 = (tv.add(n) for n in ("Appearance & Font", "Editor Behavior", "Compiler & Toolchain",
+                                                  "Linter & Sync", "Packages"))
+        for t in (t1, t2, t3, t4, t5):
             t.grid_columnconfigure(1, weight=1)
 
         self._option(t1, 0, "Appearance mode", "appearance_mode", list(CHOICES["appearance_mode"]))
@@ -117,6 +120,18 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(t4, text="Tip: open the files in Notepad++ (📝), edit there, press Ctrl+S -\n"
                               "VeriFlow reloads the code and re-runs the simulation automatically.",
                      justify="left", text_color=VS["muted"]).grid(row=5, column=0, columnspan=3, sticky="w", pady=12)
+
+        self._switch(t5, 0, "Auto-resolve package modules (-y per package folder, -l for multi-module / renamed files)",
+                     "auto_resolve_packages_with_l_flag")
+        ctk.CTkLabel(t5, text=f"Global package vault:\n{app.pkg.vault}", justify="left", anchor="w",
+                     text_color=VS["muted"]).grid(row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(8, 4))
+        pk = ctk.CTkFrame(t5, fg_color="transparent")
+        pk.grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=6)
+        ghost_button(pk, "📦 Open Package Manager", app.open_package_manager).pack(side="left", padx=(0, 6))
+        ghost_button(pk, "📂 Open Vault Folder", app.open_vault_folder).pack(side="left")
+        ctk.CTkLabel(t5, text="Load lecturer modules once (.v files, a folder or a Moodle .zip) and every new .v file you\n"
+                              "create anywhere on this PC can instantiate them - no copying, no per-folder setup.",
+                     justify="left", text_color=VS["muted"]).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=8)
 
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
@@ -218,6 +233,88 @@ class SettingsDialog(ctk.CTkToplevel):
         self._refresh_status()
 
 
+# =========================================================================== package manager dialog
+class PackageManagerDialog(ctk.CTkToplevel):
+    """All registered packages: enable/disable, import, open folder, remove."""
+
+    def __init__(self, app: "VeriFlowApp"):
+        super().__init__(app)
+        self.app, self.pkg = app, app.pkg
+        self.title(f"{APP_NAME} - Packages & Global Module Library")
+        self.geometry("900x580")
+        self.minsize(760, 440)
+        self.transient(app)
+        self.configure(fg_color=VS["editor"])
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+        ctk.CTkLabel(self, text="📦  Packages & Global Module Library", anchor="w", text_color=VS["text"],
+                     font=font(16, "bold")).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text="Modules in enabled packages resolve from ANY folder on this PC: VeriFlow passes -y for every "
+                                "enabled package folder and -l for files whose name differs from the module or that hold several "
+                                "modules.", anchor="w", justify="left", wraplength=840, text_color=VS["muted"], font=font(12)).grid(
+            row=1, column=0, sticky="ew", padx=16)
+        acts = ctk.CTkFrame(self, fg_color="transparent")
+        acts.grid(row=2, column=0, sticky="ew", padx=14, pady=10)
+        for text, cmd in (("+ Load .v Files", app.import_v_files), ("+ Load Folder", app.import_folder),
+                          ("+ Load .zip", app.import_zip), ("📂 Open Vault Folder", app.open_vault_folder)):
+            ghost_button(acts, text, cmd).pack(side="left", padx=(0, 6))
+        self.auto_var = tk.BooleanVar(value=bool(app.cfg["auto_resolve_packages_with_l_flag"]))
+        ctk.CTkSwitch(acts, text="Auto-resolve with -l", variable=self.auto_var, switch_width=30, switch_height=15,
+                      progress_color=VS["accent"], text_color=VS["text"],
+                      command=lambda: app.cfg.update(auto_resolve_packages_with_l_flag=self.auto_var.get())).pack(side="right")
+        self.list = ctk.CTkScrollableFrame(self, corner_radius=0, fg_color=VS["sidebar"], scrollbar_button_color=VS["scroll_thumb"],
+                                           scrollbar_button_hover_color=VS["scroll_hover"])
+        self.list.grid(row=3, column=0, sticky="nsew", padx=14)
+        self.list.grid_columnconfigure(1, weight=1)
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.grid(row=4, column=0, sticky="ew", padx=14, pady=10)
+        self.vault_lbl = ctk.CTkLabel(bottom, text="", text_color=VS["muted"], font=font(11))
+        self.vault_lbl.pack(side="left")
+        ctk.CTkButton(bottom, text="Close", width=90, height=26, corner_radius=3, fg_color=VS["accent"],
+                      command=self.destroy).pack(side="right")
+        self.refresh()
+        self.after(120, lambda: (self.lift(), self.focus_force()))
+
+    def refresh(self) -> None:
+        for w in self.list.winfo_children():
+            w.destroy()
+        self.auto_var.set(bool(self.app.cfg["auto_resolve_packages_with_l_flag"]))
+        self.vault_lbl.configure(text=f"Vault: {self.pkg.vault}")
+        for c, h in enumerate(("On", "Package", "Type", "Modules", "")):
+            ctk.CTkLabel(self.list, text=h.upper(), anchor="w", text_color=VS["muted"], font=font(10, "bold")).grid(
+                row=0, column=c, sticky="w", padx=8, pady=(4, 2))
+        kinds = {"builtin": "Course library", "vault": "Vault copy", "linked": "Linked folder"}
+        for r, (p, mods) in enumerate(self.pkg.modules_by_package(), start=1):
+            var = tk.BooleanVar(value=p["enabled"])
+            ctk.CTkCheckBox(self.list, text="", variable=var, width=20, checkbox_width=15, checkbox_height=15, corner_radius=2,
+                            border_width=1, command=lambda n=p["name"], v=var: self.pkg.toggle_package_enabled(n, v.get())).grid(
+                row=r, column=0, padx=8, pady=4)
+            cell = ctk.CTkFrame(self.list, fg_color="transparent")
+            cell.grid(row=r, column=1, sticky="ew", pady=4)
+            ctk.CTkLabel(cell, text=p["name"], anchor="w", text_color=VS["text"], font=font(13, "bold")).pack(anchor="w")
+            ctk.CTkLabel(cell, text=p["path"] + ("" if p["exists"] else "   (folder not found)"), anchor="w",
+                         text_color=VS["muted"] if p["exists"] else ACCENT["err"], font=font(10)).pack(anchor="w")
+            ctk.CTkLabel(self.list, text=kinds[p["kind"]], text_color=VS["text"], font=font(12)).grid(row=r, column=2, sticky="w", padx=8)
+            ctk.CTkLabel(self.list, text=str(len(mods)), text_color=VS["text"], font=font(12)).grid(row=r, column=3, sticky="w", padx=8)
+            acts = ctk.CTkFrame(self.list, fg_color="transparent")
+            acts.grid(row=r, column=4, padx=6)
+            icon_button(acts, "📂", lambda q=p["path"]: self.app.open_folder(q), width=30).pack(side="left")
+            rm = icon_button(acts, "🗑", lambda q=p: self._remove(q), width=30)
+            rm.pack(side="left")
+            if p["kind"] == "builtin":
+                rm.configure(state="disabled")
+
+    def _remove(self, p: dict) -> None:
+        if p["kind"] == "vault":
+            msg = (f"Delete package '{p['name']}'?\n\nIts copies in the vault are permanently deleted:\n{p['path']}\n\n"
+                   f"The original files you imported from are not touched.")
+        else:
+            msg = f"Stop using the linked folder '{p['name']}'?\n\n{p['path']}\n\nThe folder and its files stay on disk."
+        if messagebox.askyesno("Remove package", msg, parent=self):
+            res = self.pkg.remove_package(p["name"])
+            self.app.log(f"📦 {res['message']}", "ok" if res["ok"] else "warn")
+
+
 # =========================================================================== main window
 class VeriFlowApp(ctk.CTk):
     def __init__(self):
@@ -234,11 +331,16 @@ class VeriFlowApp(ctk.CTk):
         self.configure(fg_color=VS["editor"])
         self.events: queue.Queue = queue.Queue()
         self.runner = VerilogRunner(self.cfg, self.events)
+        self.pkg = PackageManager(self.cfg)
+        self.runner.package_manager = self.pkg
+        self._pkg_groups: list = []
+        self._pkg_collapsed: set[str] = set()
+        self._pkg_stats = (0, 0)
+        self._pkg_dialog: PackageManagerDialog | None = None
         self.work_dir: Path | None = None
         self.module: str | None = None
         self.modules: dict[str, dict] = {}
         self.extra_vars: dict[str, tk.BooleanVar] = {}
-        self.lib_modules: dict[str, dict] = {}
         self.ws_modules: dict[str, dict] = {}
         self._parse_cache: dict = {}
         self.lint_diags: list[dict] = []
@@ -288,11 +390,11 @@ class VeriFlowApp(ctk.CTk):
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.grid(row=0, column=0, padx=(8, 0))
         ghost_button(left, "📂 Open…", self.choose_folder, height=26).pack(side="left", padx=(0, 4))
-        self.recent_menu = ctk.CTkOptionMenu(left, values=[RECENT_LABEL], width=112, command=self._open_recent, **option_style())
+        self.recent_menu = ctk.CTkOptionMenu(left, values=[RECENT_LABEL], width=96, command=self._open_recent, **option_style())
         self.recent_menu.set(RECENT_LABEL)
         self.recent_menu.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(left, text="Module:", text_color=VS["muted"], font=font(12)).pack(side="left", padx=(0, 4))
-        self.module_menu = ctk.CTkOptionMenu(left, values=["(no modules)"], width=140, command=self._module_selected, **option_style())
+        self.module_menu = ctk.CTkOptionMenu(left, values=["(no modules)"], width=124, command=self._module_selected, **option_style())
         self.module_menu.pack(side="left", padx=(0, 4))
         ghost_button(left, "+ New .v", self.new_module, height=26).pack(side="left")
         vline(bar).grid(row=0, column=1, sticky="ns", padx=10, pady=9)
@@ -319,9 +421,10 @@ class VeriFlowApp(ctk.CTk):
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.grid(row=0, column=4, padx=(0, 8))
-        icon_button(right, "📝 Notepad++", self.open_in_npp, width=0, font=font(12)).pack(side="left", padx=1)
+        icon_button(right, "📦 Packages", self.open_package_manager, width=0, font=font(12)).pack(side="left", padx=1)
+        icon_button(right, "📝 N++", self.open_in_npp, width=0, font=font(12)).pack(side="left", padx=1)
         icon_button(right, "🧹 Clean", self.clean, width=0, font=font(12)).pack(side="left", padx=1)
-        self.snippet_menu = ctk.CTkOptionMenu(right, values=list(SNIPPETS), width=112, command=self._insert_snippet, **option_style())
+        self.snippet_menu = ctk.CTkOptionMenu(right, values=list(SNIPPETS), width=100, command=self._insert_snippet, **option_style())
         self.snippet_menu.set(SNIPPET_LABEL)
         self.snippet_menu.pack(side="left", padx=(4, 6))
         vline(right).pack(side="left", fill="y", pady=9, padx=4)
@@ -348,7 +451,7 @@ class VeriFlowApp(ctk.CTk):
         body.grid(row=3, column=0, sticky="nsew")
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(2, weight=1)
-        self.activity = ActivityBar(body, [("explorer", "📁", "Explorer  (Ctrl+B)"), ("library", "📚", "Lecturer Library"),
+        self.activity = ActivityBar(body, [("explorer", "📁", "Explorer  (Ctrl+B)"), ("library", "📚", "Library & Packages"),
                                            ("run", "▶", "Run & Compile"), ("npp", "📝", "Open in Notepad++")],
                                     [("settings", "⚙", "Settings  (Ctrl+,)")], self._on_activity)
         self.activity.grid(row=0, column=0, sticky="ns")
@@ -431,22 +534,30 @@ class VeriFlowApp(ctk.CTk):
     def _build_library(self, parent) -> ctk.CTkFrame:
         v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
         v.grid_columnconfigure(0, weight=1)
-        v.grid_rowconfigure(3, weight=3)
-        v.grid_rowconfigure(5, weight=2)
-        self.library_title = self._side_header(v, "LIBRARY: COMPSTRUCT\\LIB", [("↻", self._load_library)])
-        self.lib_search = ctk.CTkEntry(v, placeholder_text="🔍 Filter library modules…", height=26, **entry_style())
-        self.lib_search.grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 4))
+        v.grid_rowconfigure(4, weight=3)
+        v.grid_rowconfigure(6, weight=2)
+        self.library_title = self._side_header(v, "LIBRARY & PACKAGES", [("📦", self.open_package_manager),
+                                                                          ("↻", self._load_library)])
+        acts = ctk.CTkFrame(v, fg_color="transparent")
+        acts.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
+        acts.grid_columnconfigure((0, 1, 2), weight=1)
+        for c, (text, cmd) in enumerate((("+ .v Files", self.import_v_files), ("+ Folder", self.import_folder),
+                                         ("+ .zip", self.import_zip))):
+            ghost_button(acts, text, cmd, height=24).grid(row=0, column=c, sticky="ew", padx=(0 if c == 0 else 3, 0))
+        self.lib_search = ctk.CTkEntry(v, placeholder_text="🔍 Search all loaded modules (e.g. Mux, Adder, DFF)…", height=26,
+                                       **entry_style())
+        self.lib_search.grid(row=2, column=0, sticky="ew", padx=10, pady=(2, 4))
         self.lib_search.bind("<KeyRelease>", lambda e: self._render_library())
         self.lib_label = ctk.CTkLabel(v, text="", anchor="w", justify="left", wraplength=230, text_color=VS["muted"], font=font(10))
-        self.lib_label.grid(row=2, column=0, sticky="ew", padx=14)
+        self.lib_label.grid(row=3, column=0, sticky="ew", padx=14)
         self.lib_list = self._scroll_list(v)
-        self.lib_list.grid(row=3, column=0, sticky="nsew")
-        hline(v).grid(row=4, column=0, sticky="ew")
+        self.lib_list.grid(row=4, column=0, sticky="nsew")
+        hline(v).grid(row=5, column=0, sticky="ew")
         self.lib_detail = ctk.CTkTextbox(v, height=150, font=("Consolas", 11), wrap="none", corner_radius=0, border_width=0,
                                          fg_color=VS["editor"], text_color=VS["text"])
-        self.lib_detail.grid(row=5, column=0, sticky="nsew")
+        self.lib_detail.grid(row=6, column=0, sticky="nsew")
         btns = ctk.CTkFrame(v, fg_color="transparent")
-        btns.grid(row=6, column=0, sticky="ew", padx=8, pady=6)
+        btns.grid(row=7, column=0, sticky="ew", padx=8, pady=6)
         btns.grid_columnconfigure((0, 1), weight=1)
         ghost_button(btns, "📋 Copy Instantiation", self._copy_inst, height=24).grid(row=0, column=0, sticky="ew", padx=(0, 3))
         ghost_button(btns, "⤵ Insert at Cursor", self._insert_inst, height=24).grid(row=0, column=1, sticky="ew", padx=(3, 0))
@@ -569,14 +680,15 @@ class VeriFlowApp(ctk.CTk):
         self.st_saved = item(1, "✔ Saved")
         self.st_time = item(2, "⏱ Pipeline: -")
         self.st_sync = item(3, "⇄ N++ Sync: OFF", click=lambda: self.cfg.update(live_sync_enabled=not self.cfg["live_sync_enabled"]))
-        self.st_msg = item(4, "", weight=1)
-        self.st_module = item(5, "Module: -")
-        self.st_pos = item(6, "Ln 1, Col 1")
-        self.st_spaces = item(7, "Spaces: 4", click=self.open_settings)
-        self.st_font = item(8, "Font: 13pt", click=self.open_settings)
-        item(9, "UTF-8")
-        self.st_std = item(10, "SystemVerilog (-g2012)", click=lambda: self._show_view("run", force=True))
-        self.st_tool = item(11, "", click=self.open_settings)
+        self.st_pkg = item(4, "📦 Packages: -", click=lambda: self._show_view("library", force=True))
+        self.st_msg = item(5, "", weight=1)
+        self.st_module = item(6, "Module: -")
+        self.st_pos = item(7, "Ln 1, Col 1")
+        self.st_spaces = item(8, "Spaces: 4", click=self.open_settings)
+        self.st_font = item(9, "Font: 13pt", click=self.open_settings)
+        item(10, "UTF-8")
+        self.st_std = item(11, "SystemVerilog (-g2012)", click=lambda: self._show_view("run", force=True))
+        self.st_tool = item(12, "", click=self.open_settings)
 
     def _status_hover(self) -> str:
         """VS Code lightens a status-bar item on hover."""
@@ -601,6 +713,8 @@ class VeriFlowApp(ctk.CTk):
         std = c["std_flag"]
         self.st_std.configure(text=f"{'SystemVerilog' if 'sv' in std or '2012' in std else 'Verilog'} ({std})")
         self.st_tool.configure(text=self._tool_text)
+        active, total = self._pkg_stats
+        self.st_pkg.configure(text=f"📦 Packages: {active} active ({total} modules indexed)")
 
     # ================================================================== startup / theme
     def _startup(self) -> None:
@@ -675,8 +789,12 @@ class VeriFlowApp(ctk.CTk):
             self.wave.set_radix(self.cfg["default_radix"])
         if keys & {"iverilog_path", "vvp_path", "gtkwave_path", "notepad_pp_path", "lib_dir"}:
             self._update_toolchain_ui()
-            if "lib_dir" in keys:
-                self._load_library()
+        if keys & {"library_packages", "lib_dir", "global_packages_dir", "auto_resolve_packages_with_l_flag"}:
+            self._load_library()
+            self.run_lint()
+            self._update_cmd()
+            if self._pkg_dialog is not None and self._pkg_dialog.winfo_exists():
+                self._pkg_dialog.refresh()
         if keys & {"live_sync_enabled", "external_poll_interval_ms"}:
             (self.sync_switch.select if self.cfg["live_sync_enabled"] else self.sync_switch.deselect)()
             self._restart_sync()
@@ -1074,34 +1192,151 @@ class VeriFlowApp(ctk.CTk):
 
     # ================================================================== library
     def _load_library(self) -> None:
-        lib = Path(self.cfg["lib_dir"])
-        self.lib_modules = scan_module_dir(lib, self._parse_cache) if lib.is_dir() else {}
-        if lib.is_dir():
-            self.lib_label.configure(text=f"{lib}  ·  {len(self.lib_modules)} modules")
-            self.library_title.configure(text=f"LIBRARY: {lib.parent.name.upper()}\\{lib.name.upper()}")
-            self.lib_search.configure(placeholder_text=f"🔍 Filter {len(self.lib_modules)} library modules…")
+        self._pkg_groups = self.pkg.modules_by_package()
+        self._pkg_stats = self.pkg.stats()
+        active, total = self._pkg_stats
+        self.lib_label.configure(text=f"{active} active package(s) · {total} modules indexed · double-click = preview")
+        self.lib_search.configure(placeholder_text=f"🔍 Search {total} loaded modules (e.g. Mux, Adder, DFF)…")
+        self._render_library()
+        self._refresh_status_items()
+
+    def _toggle_pkg_collapsed(self, name: str) -> None:
+        self._pkg_collapsed ^= {name}
         self._render_library()
 
     def _render_library(self) -> None:
         for w in self.lib_list.winfo_children():
             w.destroy()
         q = self.lib_search.get().strip().lower()
-        for r, name in enumerate(n for n in sorted(self.lib_modules, key=str.lower) if q in n.lower()):
-            m = self.lib_modules[name]
-            sig = ", ".join(p["name"] for p in m["ports"])
-            sel = self._lib_selected is m
-            ctk.CTkButton(self.lib_list, text=f"{name}  ({sig})", anchor="w", height=24, corner_radius=0, border_width=0,
-                          fg_color=VS["selected"] if sel else "transparent", hover_color=VS["hover"],
-                          text_color=VS["selected_fg"] if sel else VS["text"], font=font(12),
-                          command=lambda mm=m: self._show_lib(mm)).grid(row=r, column=0, sticky="ew")
+        r = 0
+        for pkg, mods in self._pkg_groups:
+            shown = [m for m in mods if not q or q in m["module_name"].lower() or q in pkg["name"].lower()]
+            if q and not shown:
+                continue
+            collapsed = pkg["name"] in self._pkg_collapsed and not q
+            head = ctk.CTkFrame(self.lib_list, height=26, corner_radius=0, fg_color="transparent")
+            head.grid(row=r, column=0, sticky="ew", pady=(4 if r else 0, 0))
+            head.grid_columnconfigure(0, weight=1)
+            r += 1
+            lab = ctk.CTkLabel(head, text=f"{'▸' if collapsed else '▾'} 📦 {pkg['name']}  [{len(mods)}]", anchor="w",
+                               font=font(11, "bold"), cursor="hand2",
+                               text_color=VS["sidebar_header"] if pkg["enabled"] else VS["muted"])
+            lab.grid(row=0, column=0, sticky="ew", padx=(6, 2))
+            lab.bind("<Button-1>", lambda e, n=pkg["name"]: self._toggle_pkg_collapsed(n))
+            var = tk.BooleanVar(value=pkg["enabled"])
+            ctk.CTkCheckBox(head, text="", variable=var, width=18, checkbox_width=14, checkbox_height=14, corner_radius=2,
+                            border_width=1, command=lambda n=pkg["name"], vv=var: self.pkg.toggle_package_enabled(n, vv.get())).grid(
+                row=0, column=1, padx=(0, 8))
+            if not pkg["exists"]:
+                ctk.CTkLabel(self.lib_list, text="      folder not found", anchor="w", text_color=ACCENT["err"],
+                             font=font(10)).grid(row=r, column=0, sticky="ew")
+                r += 1
+            if collapsed:
+                continue
+            for m in shown:
+                sig = ", ".join(p["name"] for p in m["ports"])
+                sel = (self._lib_selected is not None and self._lib_selected.get("module_name") == m["module_name"]
+                       and self._lib_selected.get("filepath") == m["filepath"])
+                b = ctk.CTkButton(self.lib_list, text=f"    {m['module_name']}  ({sig})", anchor="w", height=24, corner_radius=0,
+                                  border_width=0, fg_color=VS["selected"] if sel else "transparent", hover_color=VS["hover"],
+                                  text_color=(VS["selected_fg"] if sel else VS["text"]) if pkg["enabled"] else VS["muted"],
+                                  font=font(12), command=lambda mm=m: self._show_lib(mm))
+                b.grid(row=r, column=0, sticky="ew")
+                b.bind("<Double-Button-1>", lambda e, mm=m: self._preview_module(mm))
+                r += 1
+        if q != getattr(self, "_lib_last_query", None):      # new filter -> show results from the top
+            self._lib_last_query = q
+            self.lib_list._parent_canvas.yview_moveto(0)
 
     def _show_lib(self, m: dict) -> None:
         self._lib_selected = m
+        how = "loaded with -l (multi-module / renamed file)" if m.get("needs_l_flag") else "found through -y"
+        head = f"// package: {m.get('package_name', '?')}\n// file:    {Path(m['filepath']).name}  ({how})\n" if m.get("filepath") else ""
         self.lib_detail.configure(state="normal")
         self.lib_detail.delete("1.0", "end")
-        self.lib_detail.insert("1.0", describe_ports(m) + "\n\n" + instantiation_template(m, "u1"))
+        self.lib_detail.insert("1.0", head + describe_ports(m) + "\n\n" + instantiation_template(m, "u1"))
         self.lib_detail.configure(state="disabled")
         self._render_library()
+
+    def _preview_module(self, m: dict) -> None:
+        """Read-only source preview of a package module (double-click in the library)."""
+        path = Path(m["filepath"])
+        try:
+            text, _nl = read_source(path)
+        except OSError as exc:
+            messagebox.showerror("Preview", f"Cannot read {path}:\n{exc}", parent=self)
+            return
+        win = ctk.CTkToplevel(self)
+        win.title(f"{m['module_name']} - {path.name}  (read-only)")
+        win.geometry("860x640")
+        win.transient(self)
+        ed = VerilogCodeEditor(win, self.cfg, role="DESIGN")
+        ed.pack(fill="both", expand=True)
+        ed.set_content(text, str(path))
+        ed.goto_line(m.get("line") or 1)
+        ed.text.configure(state="disabled")
+        win.after(150, win.lift)
+
+    # ---- package imports
+    def import_v_files(self) -> None:
+        files = filedialog.askopenfilenames(parent=self, title="Load Verilog module files into the global package vault",
+                                            filetypes=[("Verilog", "*.v *.sv"), ("All files", "*.*")])
+        if not files:
+            return
+        name = ctk.CTkInputDialog(text=f"Package name (leave empty for '{DEFAULT_IMPORT_PACKAGE}'):", title="Load .v Files").get_input()
+        if name is None:
+            return
+        self._after_import(lambda: self.pkg.import_files_to_package(list(files), name.strip() or DEFAULT_IMPORT_PACKAGE))
+
+    def import_folder(self) -> None:
+        d = filedialog.askdirectory(parent=self, title="Load a folder of Verilog modules as a global package")
+        if not d:
+            return
+        ans = messagebox.askyesnocancel(
+            "Load Folder", f"{d}\n\nYes  -  copy its .v files into the global vault\n          (keeps working even if the folder "
+                           f"is moved or deleted)\nNo   -  link the folder in place\n          (always uses the folder's latest "
+                           f"files)", parent=self)
+        if ans is None:
+            return
+        self._after_import(lambda: self.pkg.add_external_library_folder(Path(d), copy_to_vault=ans))
+
+    def import_zip(self) -> None:
+        f = filedialog.askopenfilename(parent=self, title="Load a course .zip of Verilog modules",
+                                       filetypes=[("Zip archives", "*.zip"), ("All files", "*.*")])
+        if f:
+            self._after_import(lambda: self.pkg.import_zip_package(Path(f)))
+
+    def _after_import(self, action) -> None:
+        try:
+            r = action()
+        except (OSError, ValueError, zipfile.BadZipFile) as exc:
+            messagebox.showerror("Import failed", str(exc), parent=self)
+            return
+        mods = r["modules"]
+        self.log(f"📦 Package '{r['package']}': {len(r['files'])} file(s), {len(mods)} module(s) - "
+                 f"{', '.join(mods[:24])}{' …' if len(mods) > 24 else ''}", "ok")
+        if r["skipped"]:
+            self.log(f"   skipped (not .v/.sv): {', '.join(r['skipped'][:12])}", "dim")
+        self.st_msg.configure(text=f"Package '{r['package']}' loaded - {len(mods)} modules usable from any folder")
+        self._show_view("library", force=True)
+
+    def open_package_manager(self) -> None:
+        if self._pkg_dialog is not None and self._pkg_dialog.winfo_exists():
+            self._pkg_dialog.refresh()
+            self._pkg_dialog.lift()
+            self._pkg_dialog.focus_force()
+            return
+        self._pkg_dialog = PackageManagerDialog(self)
+
+    def open_vault_folder(self) -> None:
+        self.open_folder(self.pkg.open_vault_folder())
+
+    def open_folder(self, path) -> None:
+        p = Path(path)
+        if p.is_dir() and IS_WINDOWS:
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        elif not p.is_dir():
+            messagebox.showwarning("Open folder", f"Folder not found:\n{p}", parent=self)
 
     def _copy_inst(self) -> None:
         if self._lib_selected:
@@ -1121,11 +1356,8 @@ class VeriFlowApp(ctk.CTk):
 
     # ================================================================== linting & problems
     def _known_modules(self) -> dict[str, dict]:
-        known = dict(self.lib_modules)
-        if self.work_dir:
-            self.ws_modules = scan_module_dir(self.work_dir, self._parse_cache)
-            known.update(self.ws_modules)
-        return known
+        """Workspace + every enabled package (the same index the compiler resolves -y / -l from)."""
+        return self.pkg.build_index(self.work_dir)
 
     def run_lint(self, show: bool = False) -> list[dict]:
         self._lint_job = None
@@ -1260,7 +1492,7 @@ class VeriFlowApp(ctk.CTk):
 
     def _poll_events(self) -> None:
         if self._probe_result:
-            self._tool_text = f"{self._probe_result} ({len(self.lib_modules)} lib modules)"
+            self._tool_text = self._probe_result
             self._probe_result = ""
             self._refresh_status_items()
         while True:
@@ -1280,6 +1512,14 @@ class VeriFlowApp(ctk.CTk):
         p = ev.payload
         if ev.kind == "STAGE_START":
             self.log(f"$ {p['cmd']}", "cmd")
+            res = p.get("resolution") or {}
+            if res.get("l_files"):
+                self.log(f"📦 auto-loaded with -l: {', '.join(Path(f).name for f in res['l_files'])}", "dim")
+            for note in res.get("notes", []):
+                self.log(f"📦 {note}", "dim")
+            if res.get("missing"):
+                self.log(f"⚠ not found in the workspace or any enabled package: {', '.join(res['missing'])} - "
+                         f"load them with 📦 Packages", "warn")
             self._set_status("running", "⟳ Compiling…" if p["stage"] == "compile" else "⟳ Simulating…")
         elif ev.kind == "COMPILE_DONE":
             for line in (p.get("stderr", "") + "\n" + p.get("stdout", "")).splitlines():

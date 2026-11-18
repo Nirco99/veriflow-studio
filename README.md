@@ -67,9 +67,9 @@ Every run performs, in order:
 2. **Static course linter** on both files (results go to *Problems & Linter*).
 3. **Stale-binary removal** – the previous `<WorkDir>\<Module>` image is deleted first, so a failed compile can never
    silently execute an old binary.
-4. **Compilation** – `iverilog -g2012 -o<Module> -y <lecturer lib> -y <workspace> -Wall -Winfloop <Module>.v <Module>_tb.v [extra files]`.
-   Both `-y` paths are added automatically, so your own sub-modules (e.g. `HalfAdder.v`) and the lecturer's modules are
-   found without listing them. Success requires exit code `0`, no error lines, **and** a freshly written output file.
+4. **Compilation** – `iverilog -g2012 -o<Module> -y <workspace> -y <lecturer lib> -y <packages…> -Wall -Winfloop [-l <package file>…] <Module>.v <Module>_tb.v [extra files]`.
+   The `-y` paths (and any `-l` library files – see the package loader below) are added automatically, so your own
+   sub-modules (e.g. `HalfAdder.v`), the lecturer's modules and every loaded package are found without listing them. Success requires exit code `0`, no error lines, **and** a freshly written output file.
 5. **Simulation** – `vvp -n <Module>`. The `-n` flag turns `$stop` into `$finish`, so a testbench can never hang
    waiting for interactive input. A configurable **timeout** (default 3 s) kills the whole process tree
    (`taskkill /F /T`) if the testbench has no `$finish` or contains a zero-delay infinite loop.
@@ -100,18 +100,18 @@ Compiler output is parsed with a Windows-safe regex that understands drive lette
 compiles, simulates and updates the truth table and waveform — no clicks needed. If you also have unsaved edits inside
 VeriFlow, it refuses to overwrite them and warns you instead.
 
-* `📝 Notepad++` opens both files of the active module in Notepad++ and switches Live Sync on automatically.
+* `📝 N++` (Notepad++) opens both files of the active module in Notepad++ and switches Live Sync on automatically.
 * Clicking a problem that lives in a file not open in the editors (for example a lecturer library file) opens it in
   Notepad++ **at the exact line** (`notepad++ -n<line> <file>`).
 
-#### 📁 Workspace explorer & 📚 lecturer library inspector
+#### 📁 Workspace explorer & 📚 library inspector
 
 * The **Explorer** pairs every `<Module>.v` with `<Module>_tb.v` automatically: a green dot + `Ready` badge when the
   testbench exists, an amber dot + `No TB` badge when it is missing.
 * **Extra .v files (compile overrides)** lets you tick additional files to pass to `iverilog` explicitly (normally not
   needed thanks to `-y`).
-* The **Library** view lists every module in `C:\iverilog\compstruct\lib` (44 modules in the standard course library)
-  with a live filter box (type `mux`, `adder`, `xor`…). Selecting a module shows its parameters and exact port
+* The **Library & Packages** view lists every module in `C:\iverilog\compstruct\lib` (44 modules in the standard course
+  library) and in every loaded package (see below), with a live search box (type `mux`, `adder`, `xor`…). Selecting a module shows its parameters and exact port
   signature, and two buttons paste ready-made wiring:
   `📋 Copy Instantiation` and `⤵ Insert at Cursor`, e.g.
 
@@ -122,6 +122,64 @@ VeriFlow, it refuses to overwrite them and warns you instead.
       .s   (s)
   );
   ```
+
+#### 📦 Global Module & Package Loader ("Import Once, Run Anywhere")
+
+Lecturers hand out modules as loose `.v` files, as a folder, or as a Moodle `.zip` – often with **several modules in one
+file** (`course_primitives.v`) or a **file name that differs from the module name** (`mux_lib.v` containing
+`module Mux4`). Plain `iverilog -y <dir>` only finds a module stored in a file called exactly `<ModuleName>.v`, so
+those fail with `error: Unknown module type`. VeriFlow's package manager solves this **once for the whole PC**: load the
+modules one time, and every new `.v` file you create in *any* folder (`Desktop\HW4`, `Documents\Lab5`,
+`Downloads\Test`…) can instantiate them with zero per-folder setup.
+
+**Load modules once** – from the **📚 Library & Packages** side bar, the **`📦 Packages`** toolbar button, or
+**⚙ Settings → Packages**:
+
+| Button | What it does |
+|---|---|
+| `+ .v Files` | Pick one or more `.v` / `.sv` files anywhere on the PC. They are **copied into the global package vault** (you name the package; default `Imported_Course_Modules`). |
+| `+ Folder` | **Yes** = copy the folder's `.v` files into the vault (keeps working even if the original folder is moved or deleted). **No** = **link the folder in place** – it is scanned recursively and always uses its latest files. |
+| `+ .zip` | Pick a course `.zip` (e.g. from Moodle). Every `.v` / `.sv` inside is extracted into a vault package named after the archive; folder structure is flattened and other files are skipped. |
+
+The vault lives at `%USERPROFILE%\.veriflow_studio\packages\<package>` (setting `global_packages_dir`).
+
+**How compiling finds them – from any folder:**
+
+1. **`-y` for every enabled package folder** – the workspace comes first (so your own modules always win), then the
+   course library `C:\iverilog\compstruct\lib`, then the vault and linked packages.
+2. **`-l` for files `-y` cannot see.** VeriFlow indexes every module in every package (all modules of multi-module
+   files included) and traces your design's instantiations **recursively** (`Top` → `Mux4` → `Mux2`…). Any needed module
+   that lives in a multi-module file, a file whose name differs from the module, a `.sv` file, or a sub-folder is loaded
+   with **`-l <file>`** – iverilog's *library file* mode, so only the modules you actually use are elaborated and the rest
+   never become stray top-level modules. The flags are placed before the source files, as iverilog requires.
+3. **No "already declared" clashes.** If a package file also defines a module that you defined yourself (for example
+   your own `Inv.v`), VeriFlow passes a cached copy of that file with just that module blanked out – your version wins.
+
+A resolved command looks like:
+
+```bat
+iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFILE%\.veriflow_studio\packages\course_modules" ^
+         -Wall -Winfloop -l "...\course_modules\mux_lib.v" -l "...\course_modules\course_primitives.v" Top.v Top_tb.v
+```
+
+The console prints `📦 auto-loaded with -l: mux_lib.v, course_primitives.v`, and the panel's **Actual / Baseline** switch
+still shows either this full command or the minimal command from the course instructions.
+
+**Browsing and using packages**
+
+* The **📚 Library & Packages** view groups modules per package (`▾ 📦 Course Built-in Library [44]`,
+  `▾ 📦 course_modules [3]`…) with an on/off checkbox per package and a search box across **all** loaded modules
+  (`Mux`, `Adder`, `DFF`…).
+* Click a module to see its package, file, how it is resolved (`-y` or `-l`), its parameters and port signature, then
+  `📋 Copy Instantiation` or `⤵ Insert at Cursor`. **Double-click** opens a read-only preview of its source.
+* The **Package Manager** window (`📦 Packages`) lists every package with its type (course library / vault copy /
+  linked folder), module count and location, and lets you enable or disable it, open its folder, or remove it. Removing a
+  vault package deletes only the vault copy (after a confirmation); removing a linked folder only forgets it – your files
+  are never touched; the built-in course library can be disabled but not removed.
+* The status bar shows `📦 Packages: K active (M modules indexed)` – click it to jump to the library.
+* The course linter uses the same index: port count/name/width checks also apply to package modules, and an unknown
+  module is reported as *"Module 'Mux8' is not found in the workspace or any loaded package – click [📦 Packages] to
+  import it"*.
 
 #### 🧪 One-click testbench (`_tb.v`) generator
 
@@ -234,9 +292,10 @@ classmates. On first launch the bundled demo is copied to `Documents\VeriFlow St
    module and whether its testbench exists.
 2. **Select or create a module** – click it in the Explorer or use the `Module:` dropdown. `+ New .v` (`Ctrl+N`)
    creates `<Name>.v` from a template (the file name always equals the module name, as `-y` requires).
-3. **Use lecturer modules** – open the **📚 Library** view, filter, select a module, then `⤵ Insert at Cursor`.
+3. **Use lecturer modules** – load them once with `📦 Packages` (`+ .v Files`, `+ Folder` or `+ .zip`), then open the
+   **📚 Library & Packages** view, search, select a module and click `⤵ Insert at Cursor`.
 4. **Create the testbench** – `🧪 Gen _tb.v` (also offered in the testbench tab when it is missing), then adjust it.
-5. **Run** – press `F5`. Or click `📝 Notepad++`, code there, and just press `Ctrl+S` – Live Sync runs everything.
+5. **Run** – press `F5`. Or click `📝 N++`, code there, and just press `Ctrl+S` – Live Sync runs everything.
 6. **Inspect the results** –
    * **Console Output** – the exact commands, raw `iverilog`/`vvp` output, colour-coded.
    * **Problems & Linter** – click a row to jump to the line.
@@ -283,9 +342,12 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | | Live Notepad++ sync | `live_sync_enabled` | off (also the `⚡ N++ Sync` switch) |
 | | Auto-run on external save | `auto_run_on_external_save` | on |
 | | Polling interval | `external_poll_interval_ms` | 500–3000 ms (default 800) |
+| Packages | Auto-resolve package modules (`-y` per folder, `-l` for multi-module / renamed files) | `auto_resolve_packages_with_l_flag` | on |
+| | Global package vault | `global_packages_dir` | `%USERPROFILE%\.veriflow_studio\packages` |
+| | Registered packages (managed in the Package Manager) | `library_packages` | the built-in course library; imported / linked packages are added here |
 
 `config.json` also remembers UI state (`last_workspace_dir`, `recent_workspaces`, `last_module`, `window_geometry`,
-`sidebar_visible`, `sidebar_view`). **Reset to Defaults** in the dialog restores everything except workspaces.
+`sidebar_visible`, `sidebar_view`). **Reset to Defaults** in the dialog restores everything except workspaces and packages.
 
 ### Keyboard shortcuts
 
@@ -320,6 +382,8 @@ veriflow-studio/
 │                        # testbench generator, VCD reader - pure functions, no GUI
 ├── config_manager.py    # Settings schema + validation + config.json persistence, VS Code colour tokens,
 │                        # editor colour schemes, toolchain auto-detection
+├── package_manager.py   # Global package vault: .v / folder / .zip import, enable/remove, -y / -l resolution,
+│                        # conflict-free cached copies of library files
 ├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
 ├── requirements.txt     # customtkinter, pygments, pyinstaller
 ├── sample_project/      # FullAdder.v + FullAdder_tb.v demo (gate-level, self-checking testbench)
@@ -416,9 +480,9 @@ C:\iverilog\bin\vvp FullAdder
 2. **Linter סטטי של הקורס** על שני הקבצים (התוצאות בלשונית *Problems & Linter*).
 3. **מחיקת קובץ בינארי ישן** – הקובץ `<WorkDir>\<Module>` מהריצה הקודמת נמחק קודם, כך שקומפילציה שנכשלה לעולם לא
    תריץ בשקט בינארי ישן.
-4. **קומפילציה** – `iverilog -g2012 -o<Module> -y <ספריית המרצה> -y <תיקיית העבודה> -Wall -Winfloop <Module>.v <Module>_tb.v`.
-   שני נתיבי ה-`-y` מתווספים אוטומטית, כך שגם תתי-מודולים שלכם (למשל `HalfAdder.v`) וגם המודולים של המרצה נמצאים
-   בלי לרשום אותם. הצלחה מחייבת קוד יציאה `0`, היעדר שורות שגיאה, **וגם** קובץ פלט שנוצר עכשיו.
+4. **קומפילציה** – `iverilog -g2012 -o<Module> -y <תיקיית העבודה> -y <ספריית המרצה> -y <חבילות…> -Wall -Winfloop [-l <קובץ חבילה>…] <Module>.v <Module>_tb.v`.
+   נתיבי ה-`-y` (וכל קובצי ספרייה עם `-l` – ראו את מנהל החבילות בהמשך) מתווספים אוטומטית, כך שגם תתי-מודולים שלכם
+   (למשל `HalfAdder.v`), גם המודולים של המרצה וגם כל חבילה טעונה נמצאים בלי לרשום אותם. הצלחה מחייבת קוד יציאה `0`, היעדר שורות שגיאה, **וגם** קובץ פלט שנוצר עכשיו.
 5. **סימולציה** – `vvp -n <Module>`. הדגל `-n` הופך את `$stop` ל-`$finish`, כך שטסטבנץ' לעולם לא "נתקע" ומחכה
    לקלט. **מגבלת זמן** (ברירת מחדל 3 שניות) הורגת את כל עץ התהליכים (`taskkill /F /T`) אם אין `$finish` או שיש
    לולאה אינסופית ללא השהיה.
@@ -449,18 +513,77 @@ C:\iverilog\bin\vvp FullAdder
 Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגלים – בלי ללחוץ על כלום. אם יש גם שינויים לא שמורים בתוך VeriFlow,
 הוא לא דורס אותם אלא מציג אזהרה.
 
-* הכפתור `📝 Notepad++` פותח את שני הקבצים של המודול הפעיל ב-Notepad++ ומדליק את הסנכרון החי אוטומטית.
+* הכפתור `📝 N++` (Notepad++) פותח את שני הקבצים של המודול הפעיל ב-Notepad++ ומדליק את הסנכרון החי אוטומטית.
 * לחיצה על שגיאה שנמצאת בקובץ שלא פתוח בעורך (למשל קובץ מספריית המרצה) פותחת אותו ב-Notepad++ **בשורה המדויקת**
   (`notepad++ -n<line> <file>`).
 
-#### 📁 סייר תיקיית העבודה ו-📚 בוחן ספריית המרצה
+#### 📁 סייר תיקיית העבודה ו-📚 בוחן הספרייה
 
 * **הסייר (Explorer)** מצמיד אוטומטית כל `<Module>.v` ל-`<Module>_tb.v`: נקודה ירוקה ותג `Ready` כשהטסטבנץ' קיים,
   נקודה כתומה ותג `No TB` כשהוא חסר.
 * **Extra .v files (compile overrides)** – סימון קבצים נוספים שיועברו ל-`iverilog` במפורש (בדרך כלל מיותר בזכות `-y`).
-* תצוגת **Library** מציגה את כל המודולים שב-`C:\iverilog\compstruct\lib` (44 מודולים בספרייה הסטנדרטית של הקורס),
-  עם תיבת סינון חיה (מקלידים `mux`, `adder`, `xor`…). בחירת מודול מציגה את הפרמטרים ואת חתימת הפורטים המדויקת, ושני
+* תצוגת **Library & Packages** מציגה את כל המודולים שב-`C:\iverilog\compstruct\lib` (44 מודולים בספרייה הסטנדרטית של
+  הקורס) ובכל חבילה טעונה (ראו בהמשך), עם תיבת חיפוש חיה (מקלידים `mux`, `adder`, `xor`…). בחירת מודול מציגה את הפרמטרים ואת חתימת הפורטים המדויקת, ושני
   כפתורים מדביקים חיווט מוכן: `📋 Copy Instantiation` ו-`⤵ Insert at Cursor`.
+
+#### 📦 מנהל חבילות וטעינת מודולים גלובלית (טעינה חד-פעמית ושימוש מכל תיקייה במחשב)
+
+מרצים מחלקים מודולים כקבצי `.v` בודדים, כתיקייה, או כקובץ `.zip` מה-Moodle – ולעיתים קרובות עם **כמה מודולים בקובץ
+אחד** (`course_primitives.v`) או עם **שם קובץ ששונה משם המודול** (`mux_lib.v` שמכיל `module Mux4`). הפקודה הרגילה
+`iverilog -y <dir>` מוצאת מודול רק כשהוא שמור בקובץ ששמו בדיוק `<ModuleName>.v`, ולכן במקרים האלה מתקבלת השגיאה
+`error: Unknown module type`. מנהל החבילות של VeriFlow פותר את זה **פעם אחת לכל המחשב**: טוענים את המודולים פעם אחת,
+וכל קובץ `.v` חדש שתיצרו ב*כל* תיקייה (`Desktop\HW4`, `Documents\Lab5`, `Downloads\Test`…) יכול להשתמש בהם – בלי שום
+הגדרה לכל תיקייה.
+
+**טוענים מודולים פעם אחת** – מסרגל הצד **📚 Library & Packages**, מהכפתור **`📦 Packages`** בסרגל העליון, או
+מ-**⚙ Settings ← Packages**:
+
+| כפתור | מה הוא עושה |
+|---|---|
+| `+ .v Files` | בוחרים קובץ `.v` / `.sv` אחד או יותר מכל מקום במחשב. הם **מועתקים לכספת החבילות הגלובלית** (נותנים שם לחבילה; ברירת מחדל `Imported_Course_Modules`). |
+| `+ Folder` | **Yes** = העתקת קבצי ה-`.v` של התיקייה לכספת (ממשיך לעבוד גם אם התיקייה המקורית הועברה או נמחקה). **No** = **קישור התיקייה במקומה** – היא נסרקת כולל תתי-תיקיות ותמיד משתמשים בקבצים העדכניים שלה. |
+| `+ .zip` | בוחרים קובץ `.zip` של הקורס (למשל מה-Moodle). כל קובץ `.v` / `.sv` שבתוכו מחולץ לחבילה בכספת בשם הארכיון; מבנה התיקיות משוטח וקבצים אחרים מדולגים. |
+
+הכספת נמצאת ב-`%USERPROFILE%\.veriflow_studio\packages\<package>` (ההגדרה `global_packages_dir`).
+
+**איך הקומפילציה מוצאת אותם – מכל תיקייה:**
+
+1. **`-y` לכל תיקיית חבילה פעילה** – קודם תיקיית העבודה (כך שהמודולים שלכם תמיד גוברים), אחר כך ספריית הקורס
+   `C:\iverilog\compstruct\lib`, ואחריהן חבילות הכספת והתיקיות המקושרות.
+2. **`-l` לקבצים ש-`-y` לא רואה.** VeriFlow מאנדקס כל מודול בכל חבילה (כולל כל המודולים שבקבצים מרובי-מודולים) ועוקב
+   **ברקורסיה** אחרי המופעים בתכנון שלכם (`Top` ← `Mux4` ← `Mux2`…). כל מודול נדרש שנמצא בקובץ מרובה מודולים, בקובץ
+   ששמו שונה משם המודול, בקובץ `.sv` או בתת-תיקייה, נטען עם **`-l <file>`** – מצב *קובץ ספרייה* של iverilog, כך שרק
+   המודולים שבאמת בשימוש עוברים אלבורציה והשאר לעולם לא הופכים למודולי-על מיותרים. הדגלים ממוקמים לפני קבצי המקור,
+   כפי ש-iverilog דורש.
+3. **בלי התנגשויות "already declared".** אם קובץ חבילה מגדיר גם מודול שהגדרתם בעצמכם (למשל `Inv.v` משלכם), VeriFlow
+   מעביר עותק שמור של הקובץ שבו רק המודול הזה מושמט – הגרסה שלכם גוברת.
+
+<div dir="ltr" align="left">
+
+```bat
+iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFILE%\.veriflow_studio\packages\course_modules" ^
+         -Wall -Winfloop -l "...\course_modules\mux_lib.v" -l "...\course_modules\course_primitives.v" Top.v Top_tb.v
+```
+
+</div>
+
+הקונסולה מדפיסה `📦 auto-loaded with -l: mux_lib.v, course_primitives.v`, והמתג **Actual / Baseline** בפאנל עדיין מציג
+או את הפקודה המלאה הזו או את הפקודה המינימלית מהנחיות הקורס.
+
+**עיון בחבילות ושימוש בהן**
+
+* תצוגת **📚 Library & Packages** מקבצת את המודולים לפי חבילה (`▾ 📦 Course Built-in Library [44]`,
+  `▾ 📦 course_modules [3]`…), עם תיבת סימון להפעלה/כיבוי של כל חבילה ותיבת חיפוש על **כל** המודולים הטעונים
+  (`Mux`, `Adder`, `DFF`…).
+* לחיצה על מודול מציגה את החבילה, הקובץ, איך הוא נטען (`-y` או `-l`), הפרמטרים וחתימת הפורטים, ואז
+  `📋 Copy Instantiation` או `⤵ Insert at Cursor`. **לחיצה כפולה** פותחת תצוגה מקדימה של קוד המקור לקריאה בלבד.
+* חלון **Package Manager** (`📦 Packages`) מציג כל חבילה עם הסוג שלה (ספריית הקורס / עותק בכספת / תיקייה מקושרת),
+  מספר המודולים והמיקום, ומאפשר להפעיל או לכבות אותה, לפתוח את התיקייה שלה או להסיר אותה. הסרת חבילת כספת מוחקת רק את
+  העותק שבכספת (אחרי אישור); הסרת תיקייה מקושרת רק "שוכחת" אותה – הקבצים שלכם לעולם לא נמחקים; את ספריית הקורס המובנית
+  אפשר לכבות אבל לא להסיר.
+* שורת הסטטוס מציגה `📦 Packages: K active (M modules indexed)` – לחיצה עליה קופצת לספרייה.
+* ה-Linter של הקורס משתמש באותו אינדקס: בדיקות מספר/שם/רוחב הפורטים חלות גם על מודולים מחבילות, ומודול לא מוכר מדווח
+  כ-*"Module 'Mux8' is not found in the workspace or any loaded package – click [📦 Packages] to import it"*.
 
 #### 🧪 מחולל טסטבנץ' (`_tb.v`) בלחיצה אחת
 
@@ -578,9 +701,10 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 1. **פתיחת תיקיית תרגיל** – `📂 Open…` (או `Ctrl+O`), או בחירה מתוך `Recent ▾`. הסייר מציג כל מודול והאם יש לו טסטבנץ'.
 2. **בחירה או יצירה של מודול** – לחיצה בסייר או בחירה מהתפריט `Module:`. הכפתור `+ New .v` (`Ctrl+N`) יוצר
    `<Name>.v` מתבנית (שם הקובץ תמיד זהה לשם המודול, כפי ש-`-y` דורש).
-3. **שימוש במודולים של המרצה** – פותחים את תצוגת **📚 Library**, מסננים, בוחרים מודול ולוחצים `⤵ Insert at Cursor`.
+3. **שימוש במודולים של המרצה** – טוענים אותם פעם אחת עם `📦 Packages` (`+ .v Files`, `+ Folder` או `+ .zip`), ואז
+   פותחים את תצוגת **📚 Library & Packages**, מחפשים, בוחרים מודול ולוחצים `⤵ Insert at Cursor`.
 4. **יצירת הטסטבנץ'** – `🧪 Gen _tb.v` (מוצע גם בלשונית הטסטבנץ' כשהוא חסר), ואז מתאימים אותו.
-5. **הרצה** – לוחצים `F5`. או לוחצים `📝 Notepad++`, כותבים שם ופשוט שומרים עם `Ctrl+S` – הסנכרון החי מריץ הכל.
+5. **הרצה** – לוחצים `F5`. או לוחצים `📝 N++`, כותבים שם ופשוט שומרים עם `Ctrl+S` – הסנכרון החי מריץ הכל.
 6. **בדיקת התוצאות** –
    * **Console Output** – הפקודות המדויקות והפלט הגולמי של `iverilog`/`vvp`, בצבעים.
    * **Problems & Linter** – לחיצה על שורה קופצת לשורה בקוד.
@@ -627,10 +751,13 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | | סנכרון חי עם Notepad++ | `live_sync_enabled` | כבוי (גם המתג `⚡ N++ Sync`) |
 | | הרצה אוטומטית בשמירה חיצונית | `auto_run_on_external_save` | פעיל |
 | | תדירות בדיקה | `external_poll_interval_ms` | 500–3000 מילישניות (ברירת מחדל 800) |
+| Packages | פענוח אוטומטי של מודולים מחבילות (`-y` לכל תיקייה, `-l` לקבצים מרובי-מודולים / בשם אחר) | `auto_resolve_packages_with_l_flag` | פעיל |
+| | כספת החבילות הגלובלית | `global_packages_dir` | `%USERPROFILE%\.veriflow_studio\packages` |
+| | החבילות הרשומות (מנוהלות בחלון Package Manager) | `library_packages` | ספריית הקורס המובנית; חבילות שיובאו / קושרו מתווספות כאן |
 
 הקובץ `config.json` זוכר גם את מצב הממשק (`last_workspace_dir`, `recent_workspaces`, `last_module`,
 `window_geometry`, `sidebar_visible`, `sidebar_view`). הכפתור **Reset to Defaults** מחזיר הכל לברירת המחדל חוץ
-מרשימת התיקיות.
+מרשימת התיקיות והחבילות.
 
 ### קיצורי מקלדת
 
@@ -662,6 +789,7 @@ veriflow-studio/
 ├── verilog_runner.py    # iverilog -> vvp pipeline, timeout/process-tree kill, diagnostics & truth-table parsers
 ├── verilog_parser.py    # Module parser, course linter, testbench generator, VCD reader (no GUI)
 ├── config_manager.py    # Settings + config.json, VS Code colour tokens, toolchain auto-detection
+├── package_manager.py   # Global package vault, .v / folder / .zip import, -y / -l resolution
 ├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
 ├── requirements.txt
 ├── sample_project/      # FullAdder.v + FullAdder_tb.v
@@ -680,6 +808,8 @@ veriflow-studio/
   פונקציות טהורות ללא ממשק גרפי.
 * **`config_manager.py`** – סכמת ההגדרות, אימות ושמירה ב-`config.json`, צבעי VS Code, ערכות צבעי העורך וזיהוי
   אוטומטי של הכלים.
+* **`package_manager.py`** – כספת החבילות הגלובלית: ייבוא קבצי `.v`, תיקיות וארכיוני `.zip`, הפעלה/הסרה של חבילות,
+  חישוב דגלי `-y` / `-l` לכל קומפילציה ועותקים שמורים ללא התנגשויות של קובצי ספרייה.
 * **`build_exe.bat`** – בנייה בלחיצה אחת ל-`dist\VeriFlowStudio.exe`.
 * **`sample_project/`** – הדגמה: מחבר מלא (Full Adder) ברמת שערים עם טסטבנץ' שבודק את עצמו.
 

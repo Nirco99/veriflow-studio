@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+import os
 import re
 from pathlib import Path
 
@@ -399,6 +400,7 @@ def parse_verilog_source(text: str, filename: str = "<memory>") -> list[dict]:
             "instantiations": instances, "ansi": ansi, "has_endmodule": em is not None,
             "body_start": body_start, "body_end": body_end,
             "end_line": _pos_to_linecol(nl, body_end)[0],
+            "span": (mm.start(), em.end() if em else len(code)),
             "_clean": clean, "_code": code,
         })
     return modules
@@ -451,6 +453,137 @@ def scan_module_dir(folder: Path | str, cache: dict | None = None) -> dict[str, 
         for m in mods:
             out.setdefault(m["module_name"], m)
     return out
+
+
+PACKAGE_SOURCE_EXTS = (".v", ".sv")
+
+
+def parse_all_modules_in_file(filepath: Path | str) -> list[dict]:
+    """Every `module ... endmodule` in a file (a lecturer file may hold many helper modules)."""
+    return parse_verilog_module(filepath).get("all_modules", [])
+
+
+def _iter_source_files(root: Path, recursive: bool, limit: int = 3000) -> list[Path]:
+    it = root.rglob("*") if recursive else root.iterdir()
+    out = []
+    for p in it:
+        if p.suffix.lower() in PACKAGE_SOURCE_EXTS and p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts):
+            out.append(p)
+            if len(out) >= limit:
+                break
+    return sorted(out, key=lambda p: str(p).lower())
+
+
+def build_global_module_index(library_dirs: list, work_dir: Path | str | None = None,
+                              cache: dict | None = None, exclude_files: list | None = None) -> dict[str, dict]:
+    """Index every module of the workspace and all package folders: name -> entry.
+
+    `library_dirs` items: Path | (Path, package_name) | {"path", "name", "recursive"}.
+    Precedence (first definition wins): workspace, then packages in the given order.
+    Entry = module info + filepath, package_name, file_modules, needs_l_flag (file stem != module name,
+    several modules in the file, a non-.v file, or a file in a sub-folder that `-y` cannot see).
+    """
+    sources: list[tuple[Path, str, bool]] = []
+    if work_dir:
+        sources.append((Path(work_dir), "Workspace", False))
+    for item in library_dirs:
+        if isinstance(item, dict):
+            sources.append((Path(item["path"]), item.get("name") or Path(item["path"]).name, bool(item.get("recursive"))))
+        elif isinstance(item, (tuple, list)):
+            sources.append((Path(item[0]), item[1], bool(item[2]) if len(item) > 2 else False))
+        else:
+            sources.append((Path(item), Path(item).name, False))
+    skip = {os.path.normcase(os.path.abspath(f)) for f in (exclude_files or [])}
+    index: dict[str, dict] = {}
+    seen_dirs: set[str] = set()
+    for root, pkg_name, recursive in sources:
+        key = os.path.normcase(os.path.abspath(root))
+        if key in seen_dirs or not root.is_dir():
+            continue
+        seen_dirs.add(key)
+        for f in _iter_source_files(root, recursive):
+            fkey = os.path.normcase(os.path.abspath(f))
+            if fkey in skip:
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if cache is not None and fkey in cache and cache[fkey][0] == (st.st_mtime, st.st_size):
+                mods = cache[fkey][1]
+            else:
+                mods = parse_all_modules_in_file(f)
+                if cache is not None:
+                    cache[fkey] = ((st.st_mtime, st.st_size), mods)
+            names = [m["module_name"] for m in mods]
+            for m in mods:
+                entry = {**m, "filepath": f, "package_name": pkg_name, "package_root": root, "file_modules": names,
+                         "needs_l_flag": (f.stem != m["module_name"] or len(mods) > 1 or f.suffix.lower() != ".v"
+                                          or os.path.normcase(str(f.parent)) != os.path.normcase(str(root)))}
+                if m["module_name"] in index:
+                    index[m["module_name"]].setdefault("shadows", []).append(f)
+                else:
+                    index[m["module_name"]] = entry
+    return index
+
+
+def resolve_required_library_files(root_files: list, known_modules: dict[str, dict],
+                                   shadowed: dict | None = None) -> tuple[list[str], list[str], list[str]]:
+    """Trace instantiations from the explicit sources and work out what iverilog needs.
+
+    Returns (y_dirs, l_files, missing_modules):
+      * y_dirs  - folders whose `<Module>.v` files resolve the rest through `-y`
+      * l_files - package files that must be loaded with `-l` (multi-module / name-mismatched files)
+      * missing - instantiated modules found nowhere (not primitives, not in workspace or packages)
+    If `shadowed` is a dict it is filled with {l_file: {module names that a higher-precedence definition
+    overrides}} - loading those unfiltered would make iverilog fail with "already declared".
+    """
+    roots = [Path(f) for f in root_files]
+    root_mods: dict[str, dict] = {}
+    for f in roots:
+        if f.is_file():
+            for m in parse_all_modules_in_file(f):
+                root_mods.setdefault(m["module_name"], m)
+    y_dirs: list[str] = []
+    l_files: list[str] = []
+    missing: list[str] = []
+    queue = [i["type"] for m in root_mods.values() for i in m["instantiations"]]
+    seen: set[str] = set()
+    while queue:
+        name = queue.pop(0)
+        if name in seen or name in GATE_PRIMITIVES:
+            continue
+        seen.add(name)
+        if name in root_mods:
+            queue.extend(i["type"] for i in root_mods[name]["instantiations"])
+            continue
+        entry = known_modules.get(name)
+        if entry is None:
+            missing.append(name)
+            continue
+        target = str(entry["filepath"]) if entry["needs_l_flag"] else str(entry["filepath"].parent)
+        bucket = l_files if entry["needs_l_flag"] else y_dirs
+        if all(os.path.normcase(target) != os.path.normcase(t) for t in bucket):
+            bucket.append(target)
+        queue.extend(i["type"] for i in entry["instantiations"])
+    if shadowed is not None:
+        for lf in l_files:
+            lkey = os.path.normcase(lf)
+            for m in parse_all_modules_in_file(lf):
+                name = m["module_name"]
+                owner = known_modules.get(name)
+                if name in root_mods or (owner is not None and os.path.normcase(str(owner["filepath"])) != lkey):
+                    shadowed.setdefault(lf, set()).add(name)
+    return y_dirs, l_files, missing
+
+
+def strip_modules_from_source(text: str, names: set[str] | list[str]) -> str:
+    """Blank out the given modules (keeping every newline, so line numbers stay valid)."""
+    names = set(names)
+    spans = [m["span"] for m in parse_verilog_source(text) if m["module_name"] in names]
+    for start, end in sorted(spans, reverse=True):
+        text = text[:start] + _blank_span(text[start:end]) + text[end:]
+    return text
 
 
 def instantiation_template(info: dict, instance_name: str = "u0") -> str:
@@ -593,7 +726,8 @@ def run_course_linter(filepath: Path | str, known_modules: dict[str, dict] | Non
                                        f"Module '{tname}' not found - did you mean '{alt}'? (Verilog names are case-sensitive)"))
                 else:
                     diags.append(_diag(path, inst["line"], "warning", "unknown-module",
-                                       f"Module '{tname}' is not defined in the workspace or the lecturer library (iverilog -y will report it missing)"))
+                                       f"Module '{tname}' is not found in the workspace or any loaded package - "
+                                       f"click [📦 Packages] to import it (iverilog will report it missing)"))
                 continue
             tports = target["ports"]
             tnames = [p["name"] for p in tports]
