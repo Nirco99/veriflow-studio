@@ -10,6 +10,11 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%2F%20Cross--Platform-0078D6?logo=windows&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
+[![Download VeriFlowStudio.exe for Windows](https://img.shields.io/badge/Download-VeriFlowStudio.exe%20%28Windows%29-2EA043?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)
+
+**No Python needed:** download the exe above, double-click it, and you're coding. If Windows shows *"Windows protected your PC"*,
+click **More info → Run anyway** (the exe is not code-signed). All versions: [Releases](https://github.com/Nirco99/veriflow-studio/releases).
+
 ![VeriFlow Studio – VS Code Dark Modern workbench](docs/screenshot.png)
 
 ---
@@ -193,6 +198,12 @@ linter, truth table and waveform can be explored on any machine. Lecturer module
 2. **Python 3.11+** – only if you run from source.
 3. *(Optional)* **Notepad++** for Live Sync and **GTKWave** for the external waveform viewer.
 
+#### Fastest — download the ready-made `.exe`
+
+Download **[VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)**
+from the [latest release](https://github.com/Nirco99/veriflow-studio/releases/latest) and double-click it – no Python or
+installation required. Each release lists the file's SHA-256 so you can verify the download.
+
 #### Option A — run from source
 
 ```bash
@@ -351,6 +362,12 @@ Released under the [MIT License](LICENSE).
 [🇬🇧 English](#english-documentation) | [🇮🇱 עברית](#תיעוד-מלא-בעברית)
 
 # VeriFlow Studio — סביבת פיתוח ל-Icarus Verilog בסגנון VS Code עם הרצה בלחיצה אחת
+
+[![הורדת VeriFlowStudio.exe ל-Windows](https://img.shields.io/badge/Download-VeriFlowStudio.exe%20%28Windows%29-2EA043?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)
+
+**לא צריך Python:** מורידים את הקובץ בכפתור למעלה, לוחצים עליו פעמיים ומתחילים לעבוד. אם Windows מציג
+*"Windows protected your PC"*, לוחצים **More info ← Run anyway** (הקובץ לא חתום דיגיטלית). כל הגרסאות:
+[Releases](https://github.com/Nirco99/veriflow-studio/releases).
 
 ### תוכן עניינים
 
@@ -517,6 +534,12 @@ Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגל
    **Auto-Detect Paths**). בלי Icarus Verilog האפליקציה רצה במצב הדגמה.
 2. **Python 3.11+** – רק אם מריצים מקוד המקור.
 3. *(אופציונלי)* **Notepad++** לסנכרון החי ו-**GTKWave** להצגת גלים חיצונית.
+
+#### הכי מהיר — הורדת קובץ ה-`.exe` המוכן
+
+מורידים את **[VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)**
+מתוך [הגרסה האחרונה](https://github.com/Nirco99/veriflow-studio/releases/latest) ולוחצים עליו פעמיים – בלי Python ובלי
+התקנה. בכל גרסה מופיע ה-SHA-256 של הקובץ, כדי שאפשר יהיה לוודא שההורדה תקינה.
 
 #### אפשרות א' — הרצה מקוד המקור
 
