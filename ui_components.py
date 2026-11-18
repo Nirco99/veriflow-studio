@@ -640,6 +640,13 @@ class VerilogCodeEditor(ctk.CTkFrame):
         self.gutter.bind("<MouseWheel>", lambda e: self.text.yview_scroll(int(-e.delta / 40), "units"))
         self.gutter.bind("<Button-1>", lambda e: self.goto_line(int(self.text.index(f"@0,{e.y}").split(".")[0])))
 
+    def add_menu_command(self, label: str, command: Callable) -> None:
+        """Let the app append its own actions (e.g. Generate Testbench) to the editor's right-click menu."""
+        if not getattr(self, "_extra_menu", False):
+            self.menu.add_separator()
+            self._extra_menu = True
+        self.menu.add_command(label=label, command=command)
+
     def _popup(self, e) -> str:
         self.text.focus_set()
         try:

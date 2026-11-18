@@ -155,6 +155,20 @@ The vault lives at `%USERPROFILE%\.veriflow_studio\packages\<package>` (setting 
 3. **No "already declared" clashes.** If a package file also defines a module that you defined yourself (for example
    your own `Inv.v`), VeriFlow passes a cached copy of that file with just that module blanked out – your version wins.
 
+**Duplicate modules are blocked at load time.** VeriFlow keeps one global map *module name → absolute file path* over every
+registered package (the course library included). Loading a file that defines a module already in that map – or two files
+in the same selection/zip/folder that define the same module – is **blocked**: the file is not copied, a warning toast
+names the module, and the Console shows where it is already defined. A linked folder is all-or-nothing (refused if it
+contains a duplicate). Re-importing the *same* file into its own package is allowed (it simply updates it). This keeps
+iverilog's `Module X was already declared` error from ever coming from your packages.
+
+**`.vh` / `.svh` headers** are imported together with the modules (from files, folders and zips). They are never treated
+as modules; instead every package folder that contains headers – plus the workspace – is passed with `-I`, so
+`` `include "defs.vh" `` works from any folder.
+
+**Renames in the editor are tracked live:** the linter uses the unsaved buffer, so renaming `module Top` to a name that
+another workspace file or a package already uses is reported immediately (an error if both files are compiled together).
+
 A resolved command looks like:
 
 ```bat
@@ -197,6 +211,10 @@ parameterised headers like `module Mux #(parameter W=16)`, multi-bit buses `[msb
 * Designs built from **lecturer modules** (which have `#5` gate delays) automatically use a longer step (`#100`) and
   sample outputs with `$display` after each step, so the truth table shows settled values instead of glitches.
 * Ends with `#… $finish;`.
+* **Right-click a module** in the Explorer (or right-click inside the design editor) → **Generate Testbench (exhaustive)**
+  or **Generate Skeleton Testbench (empty initial)**. The skeleton has the same declarations, `uut` wiring,
+  `$dumpfile`/`$dumpvars` and `$monitor`, but an empty stimulus section for you to fill in. The Explorer menu also offers
+  *Open*, *Open in Notepad++* and *Reveal in Explorer*.
 
 #### 🔎 Pre-compile course linter & diagnostics
 
@@ -214,6 +232,17 @@ The linter runs before every compile (and while you type). It catches bugs that 
 
 Every linter finding and every `iverilog`/`vvp` error appears in **Problems & Linter** (with a count badge). Clicking a
 row jumps to the file and line, which is highlighted in red (error) or amber (warning) in the editor.
+
+**⚡ Live compile check on save.** Every save starts `iverilog -tnull` in the background with the exact same flags as a
+real run (`-y`, `-l`, `-I`, `-g2012`…). `-tnull` parses and elaborates the design but writes no `vvp` image, so it is fast
+(≈0.1 s) and never touches a running simulation. Syntax and elaboration errors (e.g. `Unknown module type`) are marked
+in the editor gutter and in *Problems*, the status bar turns red (`⊗ 2 errors (live check)`), and it clears as soon as a
+save compiles cleanly. Rapid saves are coalesced into one follow-up check. Toggle it in ⚙ Settings → Linter & Sync or in
+the ▶ Run & Compile view.
+
+**🔗 Clickable error tracing in the Console.** Every `file.v:line` or `file.v:line:col` reference in the Console –
+including absolute paths such as `C:\iverilog\compstruct\lib\mux.v:14` – is rendered as a link; clicking it opens the
+file at that line (the editor for the current module, Notepad++ for any other file).
 
 #### 📊 Interactive truth table & radix converter
 
@@ -297,7 +326,8 @@ classmates. On first launch the bundled demo is copied to `Documents\VeriFlow St
 4. **Create the testbench** – `🧪 Gen _tb.v` (also offered in the testbench tab when it is missing), then adjust it.
 5. **Run** – press `F5`. Or click `📝 N++`, code there, and just press `Ctrl+S` – Live Sync runs everything.
 6. **Inspect the results** –
-   * **Console Output** – the exact commands, raw `iverilog`/`vvp` output, colour-coded.
+   * **Console Output** – the exact commands, raw `iverilog`/`vvp` output, colour-coded; `file.v:line` references are
+     clickable.
    * **Problems & Linter** – click a row to jump to the line.
    * **Truth Table** – change radix, copy as Markdown/CSV.
    * **Waveform** – zoom, place the cursor, or open GTKWave.
@@ -342,6 +372,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | | Live Notepad++ sync | `live_sync_enabled` | off (also the `⚡ N++ Sync` switch) |
 | | Auto-run on external save | `auto_run_on_external_save` | on |
 | | Polling interval | `external_poll_interval_ms` | 500–3000 ms (default 800) |
+| | Live compile check on save (`iverilog -tnull`) | `live_check_on_save` | on |
 | Packages | Auto-resolve package modules (`-y` per folder, `-l` for multi-module / renamed files) | `auto_resolve_packages_with_l_flag` | on |
 | | Global package vault | `global_packages_dir` | `%USERPROFILE%\.veriflow_studio\packages` |
 | | Registered packages (managed in the Package Manager) | `library_packages` | the built-in course library; imported / linked packages are added here |
@@ -558,6 +589,18 @@ Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגל
 3. **בלי התנגשויות "already declared".** אם קובץ חבילה מגדיר גם מודול שהגדרתם בעצמכם (למשל `Inv.v` משלכם), VeriFlow
    מעביר עותק שמור של הקובץ שבו רק המודול הזה מושמט – הגרסה שלכם גוברת.
 
+**מודולים כפולים נחסמים כבר בטעינה.** VeriFlow מחזיק מפה גלובלית אחת *שם מודול ← נתיב מלא לקובץ* על כל החבילות
+הרשומות (כולל ספריית הקורס). טעינת קובץ שמגדיר מודול שכבר נמצא במפה – או שני קבצים באותה בחירה/zip/תיקייה שמגדירים
+את אותו מודול – **נחסמת**: הקובץ לא מועתק, הודעת אזהרה קופצת עם שם המודול, והקונסולה מציגה איפה הוא כבר מוגדר. תיקייה
+מקושרת היא "הכל או כלום" (נדחית אם יש בה כפילות). ייבוא מחדש של *אותו* קובץ לחבילה שלו מותר (פשוט מעדכן אותו). כך
+השגיאה `Module X was already declared` של iverilog לעולם לא נגרמת מהחבילות שלכם.
+
+**קובצי כותרת `.vh` / `.svh`** מיובאים יחד עם המודולים (מקבצים, מתיקיות ומ-zip). הם אף פעם לא נחשבים מודולים; במקום
+זה כל תיקיית חבילה שיש בה כותרות – וגם תיקיית העבודה – מועברת עם `-I`, כך ש-`` `include "defs.vh" `` עובד מכל תיקייה.
+
+**שינוי שם מודול בעורך נבדק בזמן אמת:** ה-Linter עובד על התוכן שעוד לא נשמר, כך ששינוי `module Top` לשם שכבר קיים
+בקובץ אחר בתיקייה או בחבילה מדווח מיד (שגיאה אם שני הקבצים מקומפלים יחד).
+
 <div dir="ltr" align="left">
 
 ```bat
@@ -600,6 +643,9 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 * תכנון שבנוי מ**מודולים של המרצה** (שיש להם השהיית שער `#5`) מקבל אוטומטית צעד ארוך יותר (`#100`) ודגימה עם
   `$display` אחרי כל צעד – כך שטבלת האמת מציגה ערכים יציבים ולא "קפיצות" רגעיות.
 * מסתיים ב-`$finish`.
+* **קליק ימני על מודול** בסייר (או קליק ימני בתוך עורך התכן) ← **Generate Testbench (exhaustive)** או
+  **Generate Skeleton Testbench (empty initial)**. השלד כולל את אותן הצהרות, חיווט `uut`, `$dumpfile`/`$dumpvars`
+  ו-`$monitor`, אבל עם אזור גירוי ריק שתמלאו בעצמכם. בתפריט של הסייר יש גם *Open*, *Open in Notepad++* ו-*Reveal in Explorer*.
 
 #### 🔎 Linter של הקורס לפני קומפילציה ואבחון שגיאות
 
@@ -617,6 +663,16 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 
 כל ממצא של ה-Linter וכל שגיאה של `iverilog`/`vvp` מופיעים בלשונית **Problems & Linter** (עם תג מונה). לחיצה על שורה
 קופצת לקובץ ולשורה, שמודגשת באדום (שגיאה) או בכתום (אזהרה).
+
+**⚡ בדיקת קומפילציה חיה בכל שמירה.** כל שמירה מפעילה ברקע `iverilog -tnull` עם בדיוק אותם דגלים כמו בהרצה אמיתית
+(`-y`, `-l`, `-I`, `-g2012`…). `-tnull` מנתח ומבצע אלבורציה לתכנון אבל לא כותב קובץ `vvp`, ולכן הוא מהיר (כ-0.1 שניות)
+ולא נוגע בסימולציה שרצה. שגיאות תחביר ואלבורציה (למשל `Unknown module type`) מסומנות בשוליים של העורך וב-*Problems*,
+שורת הסטטוס הופכת לאדומה (`⊗ 2 errors (live check)`), והכל מתנקה ברגע ששמירה מתקמפלת נקי. שמירות מהירות מתאחדות
+לבדיקה אחת נוספת. מפעילים/מכבים ב-⚙ Settings ← Linter & Sync או בתצוגת ▶ Run & Compile.
+
+**🔗 מעקב שגיאות בלחיצה בקונסולה.** כל הפניה מסוג `file.v:line` או `file.v:line:col` בקונסולה – כולל נתיבים מלאים כמו
+`C:\iverilog\compstruct\lib\mux.v:14` – מוצגת כקישור; לחיצה עליה פותחת את הקובץ בשורה הזו (בעורך אם זה המודול
+הנוכחי, ב-Notepad++ לכל קובץ אחר).
 
 #### 📊 טבלת אמת אינטראקטיבית וממיר בסיסים
 
@@ -706,7 +762,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 4. **יצירת הטסטבנץ'** – `🧪 Gen _tb.v` (מוצע גם בלשונית הטסטבנץ' כשהוא חסר), ואז מתאימים אותו.
 5. **הרצה** – לוחצים `F5`. או לוחצים `📝 N++`, כותבים שם ופשוט שומרים עם `Ctrl+S` – הסנכרון החי מריץ הכל.
 6. **בדיקת התוצאות** –
-   * **Console Output** – הפקודות המדויקות והפלט הגולמי של `iverilog`/`vvp`, בצבעים.
+   * **Console Output** – הפקודות המדויקות והפלט הגולמי של `iverilog`/`vvp`, בצבעים; הפניות `file.v:line` לחיצות.
    * **Problems & Linter** – לחיצה על שורה קופצת לשורה בקוד.
    * **Truth Table** – החלפת בסיס, העתקה כ-Markdown/CSV.
    * **Waveform** – הגדלה, הצבת סמן, או פתיחה ב-GTKWave.
@@ -751,6 +807,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | | סנכרון חי עם Notepad++ | `live_sync_enabled` | כבוי (גם המתג `⚡ N++ Sync`) |
 | | הרצה אוטומטית בשמירה חיצונית | `auto_run_on_external_save` | פעיל |
 | | תדירות בדיקה | `external_poll_interval_ms` | 500–3000 מילישניות (ברירת מחדל 800) |
+| | בדיקת קומפילציה חיה בשמירה (`iverilog -tnull`) | `live_check_on_save` | פעיל |
 | Packages | פענוח אוטומטי של מודולים מחבילות (`-y` לכל תיקייה, `-l` לקבצים מרובי-מודולים / בשם אחר) | `auto_resolve_packages_with_l_flag` | פעיל |
 | | כספת החבילות הגלובלית | `global_packages_dir` | `%USERPROFILE%\.veriflow_studio\packages` |
 | | החבילות הרשומות (מנוהלות בחלון Package Manager) | `library_packages` | ספריית הקורס המובנית; חבילות שיובאו / קושרו מתווספות כאן |

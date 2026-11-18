@@ -380,6 +380,9 @@ class VerilogRunner:
         self.config = config
         self.package_manager = None          # set by the app: global -y / -l package resolution
         self.last_resolution: dict | None = None
+        self._check_thread: threading.Thread | None = None
+        self._check_pending = None
+        self._check_running = False
         self.events: queue.Queue = events or queue.Queue()
         self._proc: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
@@ -387,7 +390,8 @@ class VerilogRunner:
         self._lock = threading.Lock()
 
     # ---- command construction
-    def build_compile_cmd(self, work_dir: Path | str, module: str, extra_files: list[str] | tuple = ()) -> list[str]:
+    def build_compile_cmd(self, work_dir: Path | str, module: str, extra_files: list[str] | tuple = (),
+                          record: bool = True) -> list[str]:
         """iverilog command line. With a package manager attached: -y for the workspace (first, so the student's
         own modules win) and every enabled package folder, plus -l for package files -y cannot resolve."""
         c = self.config
@@ -414,13 +418,56 @@ class VerilogRunner:
                     add_y(d)
         for d in y_dirs:
             cmd += ["-y", d]
+        inc_dirs = ([str(work_dir)] if c["include_workdir_as_ylib"] else []) + (pm.include_dirs() if pm is not None else [])
+        for d in dict.fromkeys(inc_dirs):          # `include "x.vh" from the workspace or any package folder
+            cmd += ["-I", d]
         if c["enable_wall_warnings"]:
             cmd += ["-Wall", "-Winfloop"]
         for lf in (res or {}).get("l_files", []):
             cmd += ["-l", lf]              # must precede the source files (iverilog rejects -l after them)
         cmd += [f"{module}.v", f"{module}_tb.v", *[str(f) for f in extra_files]]
-        self.last_resolution = res
+        if record:
+            self.last_resolution = res
         return cmd
+
+    # ---- live check: `iverilog -tnull` (parse + elaborate only, no vvp image)
+    def start_syntax_check(self, work_dir: Path | str, module: str, extra_files=(), include_tb: bool = True) -> None:
+        """Background compile check used on save. Coalesces bursts of saves; never touches the run pipeline."""
+        args = (Path(work_dir), module, tuple(extra_files), include_tb)
+        with self._lock:
+            if self._check_running:                # a check is in flight: run once more with the newest args after it
+                self._check_pending = args
+                return
+            self._check_running = True
+            self._check_thread = threading.Thread(target=self._syntax_check_loop, args=(args,), daemon=True,
+                                                  name="veriflow-live-check")
+            self._check_thread.start()
+
+    def _syntax_check_loop(self, args) -> None:
+        while args is not None:
+            work_dir, module, extra, include_tb = args
+            t0 = time.time()
+            try:
+                cmd = self.build_compile_cmd(work_dir, module, extra, record=False)
+                cmd = ["-tnull" if a == f"-o{module}" else a for a in cmd]
+                if not include_tb:
+                    cmd = [a for a in cmd if a != f"{module}_tb.v"]
+                proc = subprocess.run(cmd, cwd=str(work_dir), shell=False, stdin=subprocess.DEVNULL, capture_output=True,
+                                      timeout=COMPILE_TIMEOUT_SEC, creationflags=NO_WINDOW)
+                text = (decode_output(proc.stderr) + "\n" + decode_output(proc.stdout)).strip()
+                diags = parse_compiler_output(text, work_dir)
+                for d in diags:
+                    d["source"] = "iverilog -tnull"
+                ok = not compile_failed(proc.returncode, text, diags)
+                self._emit("LIVE_CHECK", ok=ok, diagnostics=diags, duration=time.time() - t0, module=module,
+                           work_dir=str(work_dir), output=text)
+            except (OSError, subprocess.SubprocessError) as exc:
+                self._emit("LIVE_CHECK", ok=False, diagnostics=[], duration=time.time() - t0, module=module,
+                           work_dir=str(work_dir), output="", error=str(exc))
+            with self._lock:
+                args, self._check_pending = self._check_pending, None
+                if args is None:
+                    self._check_running = False
 
     def build_sim_cmd(self, module: str) -> list[str]:
         return [self.config["vvp_path"], *(["-n"] if self.config["vvp_non_interactive_flag"] else []), module]

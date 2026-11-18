@@ -29,6 +29,10 @@ from verilog_parser import (describe_ports, generate_testbench_skeleton, instant
                             parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
 from verilog_runner import NO_WINDOW, STATUS_FAIL, STATUS_XZ, VerilogRunner, clean_binaries, format_cmd
 from package_manager import DEFAULT_IMPORT_PACKAGE, PackageManager
+from verilog_parser import parse_verilog_source
+
+# file.v:12 / C:\\dir with spaces\\x.v:3:7 / mux_lib.vh:5 inside console text
+LINK_RE = re.compile(r"((?:[A-Za-z]:[\\\\/][^:*?\"<>|\r\n]+?|[^\s:\"'()<>|]+?)\.(?:sv|vh|svh|v)):(\d+)(?::(\d+))?\b")
 
 IS_WINDOWS = os.name == "nt"
 LAYOUT_LABELS = {"Side-by-Side": "Side-by-Side Split (.v + _tb.v)", "Tabbed": "Tabbed View"}
@@ -117,9 +121,11 @@ class SettingsDialog(ctk.CTkToplevel):
         self._switch(t4, 2, "Live Notepad++ sync (watch files on disk)", "live_sync_enabled")
         self._switch(t4, 3, "Auto-run when an external save is detected", "auto_run_on_external_save")
         self._slider(t4, 4, "Polling interval", "external_poll_interval_ms", 500, 3000, 25, "{:.0f} ms", int)
+        self._switch(t4, 5, "Live compile check on save (background iverilog -tnull, marks errors in the gutter)",
+                     "live_check_on_save")
         ctk.CTkLabel(t4, text="Tip: open the files in Notepad++ (📝), edit there, press Ctrl+S -\n"
                               "VeriFlow reloads the code and re-runs the simulation automatically.",
-                     justify="left", text_color=VS["muted"]).grid(row=5, column=0, columnspan=3, sticky="w", pady=12)
+                     justify="left", text_color=VS["muted"]).grid(row=6, column=0, columnspan=3, sticky="w", pady=12)
 
         self._switch(t5, 0, "Auto-resolve package modules (-y per package folder, -l for multi-module / renamed files)",
                      "auto_resolve_packages_with_l_flag")
@@ -337,6 +343,11 @@ class VeriFlowApp(ctk.CTk):
         self._pkg_collapsed: set[str] = set()
         self._pkg_stats = (0, 0)
         self._pkg_dialog: PackageManagerDialog | None = None
+        self.live_diags: list[dict] = []
+        self._links: dict[str, tuple[str, int, int]] = {}
+        self._live_job = None
+        self._toast_job = None
+        self._toast: ctk.CTkFrame | None = None
         self.work_dir: Path | None = None
         self.module: str | None = None
         self.modules: dict[str, dict] = {}
@@ -479,6 +490,8 @@ class VeriFlowApp(ctk.CTk):
         for ed in (self.design_ed, self.tb_ed):
             ed.on_app_ctrl = self._on_ctrl
         self.tb_ed.on_generate = self.generate_tb
+        self.design_ed.add_menu_command("🧪 Generate Testbench (exhaustive)", lambda: self.generate_tb())
+        self.design_ed.add_menu_command("🧪 Generate Skeleton Testbench (empty initial)", lambda: self.generate_tb(skeleton=True))
         self.active_editor = self.design_ed
         self.vpane.add(self.ed_area, minsize=int(200 * sc), stretch="always")
         self.vpane.add(self._build_panel(self.vpane), minsize=int(150 * sc), height=int(300 * sc))
@@ -585,7 +598,8 @@ class VeriFlowApp(ctk.CTk):
                            ("vvp_non_interactive_flag", "vvp -n  ($stop never hangs)"),
                            ("enable_course_linter", "Course linter"),
                            ("strict_gate_level_mode", "Strict gate-level mode"),
-                           ("auto_save_before_run", "Auto-save before run")):
+                           ("auto_save_before_run", "Auto-save before run"),
+                           ("live_check_on_save", "Live -tnull check on save")):
             var = tk.BooleanVar(value=bool(self.cfg[key]))
             self.run_vars[key] = var
             ctk.CTkCheckBox(v, text=label, variable=var, checkbox_width=15, checkbox_height=15, corner_radius=2, border_width=1,
@@ -630,6 +644,8 @@ class VeriFlowApp(ctk.CTk):
                                       font=(self.cfg["editor_font_family"], self.cfg["console_font_size"]))
         self.console.grid(row=0, column=0, sticky="nsew", padx=(8, 0))
         self.console.configure(state="disabled")
+        self.console.tag_bind("link", "<Enter>", lambda e: self.console._textbox.configure(cursor="hand2"))
+        self.console.tag_bind("link", "<Leave>", lambda e: self.console._textbox.configure(cursor="xterm"))
         pf = ctk.CTkFrame(t_prob, fg_color="transparent", corner_radius=0)
         pf.grid(row=0, column=0, sticky="nsew")
         pf.grid_columnconfigure(0, weight=1)
@@ -766,6 +782,8 @@ class VeriFlowApp(ctk.CTk):
                            ("ok", "#16825D" if light else "#89D185"), ("cmd", "#005FB8" if light else "#3794FF"),
                            ("dim", "#767676" if light else "#858585"), ("head", "#AF00DB" if light else "#C586C0")):
             self.console.tag_config(tag, foreground=color)
+        self.console.tag_config("link", underline=True, foreground="#005FB8" if light else "#3794FF")
+        self.console.tag_raise("link")                       # link colour wins over err/warn line colours
         for tag, (lc, dc) in {"error": ("#A1260D", "#F48771"), "warning": ("#9A5B00", "#CCA700"), "info": ("#005FB8", "#3794FF")}.items():
             self.prob_tree.tag_configure(tag, foreground=dc if dark else lc)
         self.truth.apply_theme(self.cfg)
@@ -1055,6 +1073,7 @@ class VeriFlowApp(ctk.CTk):
             badge.pack(side="right", padx=8)
             for w in (row, dot, lab, badge):
                 w.bind("<Button-1>", lambda e, n=name: self.select_module(n))
+                w.bind("<Button-3>", lambda e, n=name: self._module_menu(e, n))
                 if not active:
                     w.bind("<Enter>", lambda e, rw=row: rw.configure(fg_color=VS["hover"]))
                     w.bind("<Leave>", lambda e, rw=row: rw.configure(fg_color="transparent"))
@@ -1165,6 +1184,7 @@ class VeriFlowApp(ctk.CTk):
             self._scan_workspace(force=True)
         if lint:
             self.run_lint()
+        self._schedule_live_check()
         return True
 
     def save_all(self, quiet: bool = False) -> None:
@@ -1313,11 +1333,25 @@ class VeriFlowApp(ctk.CTk):
             messagebox.showerror("Import failed", str(exc), parent=self)
             return
         mods = r["modules"]
+        for b in r.get("blocked", []):
+            for c in b["conflicts"]:
+                self.log(f"⛔ blocked {b['file']}: module '{c['module']}' is already registered in {c['existing']} "
+                         f"(iverilog would fail with 'already declared')", "warn")
+        if r["skipped"]:
+            self.log(f"   skipped (not .v/.sv/.vh): {', '.join(r['skipped'][:12])}", "dim")
+        if r.get("blocked"):
+            names = sorted({c["module"] for b in r["blocked"] for c in b["conflicts"]})
+            self.toast(f"⛔ {len(r['blocked'])} file(s) blocked - duplicate module(s): {', '.join(names[:6])}"
+                       f"{' …' if len(names) > 6 else ''}. See the Console for where each is already defined.", "warn")
+            self.panel.set("console")
+        if r["package"] is None:
+            self.st_msg.configure(text="Nothing loaded - every module in the selection is already registered")
+            return
         self.log(f"📦 Package '{r['package']}': {len(r['files'])} file(s), {len(mods)} module(s) - "
                  f"{', '.join(mods[:24])}{' …' if len(mods) > 24 else ''}", "ok")
-        if r["skipped"]:
-            self.log(f"   skipped (not .v/.sv): {', '.join(r['skipped'][:12])}", "dim")
         self.st_msg.configure(text=f"Package '{r['package']}' loaded - {len(mods)} modules usable from any folder")
+        if not r.get("blocked"):
+            self.toast(f"📦 Package '{r['package']}' loaded - {len(mods)} module(s) usable from any folder", "ok")
         self._show_view("library", force=True)
 
     def open_package_manager(self) -> None:
@@ -1364,9 +1398,15 @@ class VeriFlowApp(ctk.CTk):
         self.lint_diags = []
         if self.cfg["enable_course_linter"] and self.module:
             known = self._known_modules()
-            for ed in (self.design_ed, self.tb_ed):
-                if ed.path and (Path(ed.path).exists() or ed.get_content().strip()):
-                    self.lint_diags += run_course_linter(ed.path, known, self.cfg["strict_gate_level_mode"], text=ed.get_content())
+            eds = [ed for ed in (self.design_ed, self.tb_ed) if ed.path and (Path(ed.path).exists() or ed.get_content().strip())]
+            for ed in eds:                     # unsaved buffers win: a module renamed in the editor is seen at once
+                for name in [n for n, e in known.items() if os.path.normcase(str(e["filepath"])) == os.path.normcase(ed.path)]:
+                    del known[name]
+                for m in parse_verilog_source(ed.get_content(), ed.path):
+                    known[m["module_name"]] = {**m, "filepath": Path(ed.path), "package_name": "Workspace", "needs_l_flag": False}
+            for ed in eds:
+                self.lint_diags += run_course_linter(ed.path, known, self.cfg["strict_gate_level_mode"], text=ed.get_content())
+                self.lint_diags += self.pkg.editor_collisions(ed.path, ed.get_content(), self.work_dir, self._extra_files())
         self._refresh_problems()
         if show:
             self.panel.set("problems")
@@ -1375,7 +1415,12 @@ class VeriFlowApp(ctk.CTk):
         return self.lint_diags
 
     def _refresh_problems(self) -> None:
-        diags = self.run_diags + self.lint_diags
+        seen, diags = set(), []
+        for d in self.run_diags + self.live_diags + self.lint_diags:      # drop exact duplicates across sources
+            key = (os.path.normcase(d["file"]) if d["file"] else "", d["line"], d["message"])
+            if key not in seen:
+                seen.add(key)
+                diags.append(d)
         self.prob_tree.delete(*self.prob_tree.get_children())
         self.diag_rows = {}
         order = {"error": 0, "warning": 1, "info": 2}
@@ -1473,6 +1518,7 @@ class VeriFlowApp(ctk.CTk):
             return
         self._clear_console()
         self.run_diags = []
+        self.live_diags = []
         self.run_lint()
         self._update_cmd()
         mock = not self.cfg.toolchain_available()
@@ -1510,6 +1556,9 @@ class VeriFlowApp(ctk.CTk):
 
     def _handle_event(self, ev) -> None:
         p = ev.payload
+        if ev.kind == "LIVE_CHECK":
+            self._on_live_check(p)
+            return
         if ev.kind == "STAGE_START":
             self.log(f"$ {p['cmd']}", "cmd")
             res = p.get("resolution") or {}
@@ -1614,22 +1663,113 @@ class VeriFlowApp(ctk.CTk):
 
     # ================================================================== console
     def log(self, text: str, tag: str | None = None) -> None:
+        """Append a console line; every `file.v:line[:col]` in it becomes a link that opens that line."""
         self.console.configure(state="normal")
-        self.console.insert("end", text + "\n", tag)
+        pos = 0
+        for m in LINK_RE.finditer(text):
+            if m.start() > pos:
+                self.console.insert("end", text[pos:m.start()], tag)
+            path = Path(m.group(1))
+            if not path.is_absolute() and self.work_dir:
+                path = self.work_dir / path
+            lid = f"lnk{len(self._links)}"
+            self._links[lid] = (str(path), int(m.group(2)), int(m.group(3) or 0))
+            self.console.insert("end", m.group(0), (tag, "link", lid) if tag else ("link", lid))
+            self.console.tag_bind(lid, "<Button-1>", lambda e, k=lid: self._follow_link(k))
+            pos = m.end()
+        self.console.insert("end", text[pos:] + "\n", tag)
         self.console.see("end")
         self.console.configure(state="disabled")
+
+    def _follow_link(self, lid: str) -> None:
+        f, line, col = self._links[lid]
+        self.jump_to({"file": f, "line": line, "col": col})
+        self.st_msg.configure(text=f"→ {Path(f).name}:{line}")
 
     def _clear_console(self) -> None:
         self.console.configure(state="normal")
         self.console.delete("1.0", "end")
         self.console.configure(state="disabled")
+        for lid in self._links:
+            self.console.tag_delete(lid)
+        self._links = {}
+
+    # ---- live compile check (iverilog -tnull after every save)
+    def _schedule_live_check(self) -> None:
+        if not (self.cfg["live_check_on_save"] and self.module and self.work_dir and self.cfg.toolchain_available()):
+            return
+        if self._live_job:
+            self.after_cancel(self._live_job)
+        self._live_job = self.after(250, self._start_live_check)
+
+    def _start_live_check(self) -> None:
+        self._live_job = None
+        if self.module and self.work_dir and (self.work_dir / f"{self.module}.v").is_file():
+            include_tb = (self.work_dir / f"{self.module}_tb.v").is_file()
+            self.runner.start_syntax_check(self.work_dir, self.module, self._extra_files(), include_tb=include_tb)
+
+    def _on_live_check(self, p: dict) -> None:
+        if p.get("module") != self.module or not self.work_dir or os.path.normcase(p.get("work_dir", "")) != os.path.normcase(str(self.work_dir)):
+            return                                       # stale result for a module/folder no longer open
+        if p.get("error"):
+            self.st_msg.configure(text=f"Live check could not run: {p['error']}")
+            return
+        self.live_diags = p["diagnostics"]
+        self.run_diags = [d for d in self.run_diags if d["source"] not in ("iverilog",)]   # older compile errors are stale now
+        self._refresh_problems()
+        errs = sum(d["severity"] == "error" for d in self.live_diags)
+        warns = sum(d["severity"] == "warning" for d in self.live_diags)
+        if errs:
+            self._set_status("error", f"⊗ {errs} error{'s' if errs != 1 else ''} (live check)")
+        elif self._status_state == "error":
+            self._set_status("ready", "✔ Live check clean")
+        self.st_msg.configure(text=f"Live check (iverilog -tnull, {p['duration']:.2f}s): "
+                                   + (f"{errs} error(s), {warns} warning(s)" if errs or warns else "no errors"))
+
+    # ---- toast notifications
+    def toast(self, text: str, kind: str = "info", ms: int = 6000) -> None:
+        if self._toast is not None:
+            self._toast.destroy()
+        if self._toast_job:
+            self.after_cancel(self._toast_job)
+        bg = {"warn": ("#FFF4CE", "#4D3B0F"), "ok": ("#DFF6DD", "#1E3A23"), "info": VS["group"]}.get(kind, VS["group"])
+        fg = {"warn": ("#7A5A00", "#F2CC60"), "ok": ("#16825D", "#89D185")}.get(kind, VS["text"])
+        t = ctk.CTkFrame(self, corner_radius=4, fg_color=bg, border_width=1, border_color=VS["group_border"])
+        ctk.CTkLabel(t, text=text, text_color=fg, font=font(12), wraplength=460, justify="left").pack(side="left", padx=(12, 6), pady=8)
+        icon_button(t, "✕", lambda: t.destroy(), width=24).pack(side="right", padx=6)
+        t.place(relx=1.0, rely=1.0, anchor="se", x=-18, y=-int(34 * self.sc))
+        t.lift()
+        self._toast = t
+        self._toast_job = self.after(ms, lambda: t.winfo_exists() and t.destroy())
+
+    # ---- module context menus
+    def _module_menu(self, e, name: str) -> None:
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label=f"Open {name}", command=lambda: self.select_module(name))
+        m.add_separator()
+        m.add_command(label="🧪 Generate Testbench (exhaustive)", command=lambda: self._tb_for(name, False))
+        m.add_command(label="🧪 Generate Skeleton Testbench (empty initial)", command=lambda: self._tb_for(name, True))
+        m.add_separator()
+        m.add_command(label="📝 Open in Notepad++", command=lambda: (self.select_module(name), self.open_in_npp()))
+        m.add_command(label="📂 Reveal in Explorer", command=lambda: self.open_folder(self.work_dir))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def _tb_for(self, name: str, skeleton: bool) -> None:
+        if name != self.module:
+            self.select_module(name)
+            if self.module != name:              # user cancelled the unsaved-changes prompt
+                return
+        self.generate_tb(skeleton=skeleton)
 
     def _on_btab(self) -> None:
         if self.panel.get() == "wave":
             self.after(30, self.wave.render)
 
     # ================================================================== tools
-    def generate_tb(self) -> None:
+    def generate_tb(self, skeleton: bool = False) -> None:
         if not self.module or not self.work_dir:
             return
         design = self.work_dir / f"{self.module}.v"
@@ -1643,7 +1783,7 @@ class VeriFlowApp(ctk.CTk):
                 return
         if info["module_name"] != self.module:
             self.log(f"Note: file {design.name} declares module '{info['module_name']}' - the testbench instantiates that name.", "warn")
-        tb.write_text(generate_testbench_skeleton(info), encoding="utf-8")
+        tb.write_text(generate_testbench_skeleton(info, empty_stimulus=skeleton), encoding="utf-8")
         self._scan_workspace(force=True)
         self._load_editor(self.tb_ed, tb)
         self.tb_ed.set_missing(False)
@@ -1651,7 +1791,9 @@ class VeriFlowApp(ctk.CTk):
         self._show_editor(self.tb_ed)
         self.run_lint()
         ins = sum(p["bits"] or 1 for p in info["ports"] if p["direction"] == "input")
-        self.log(f"🧪 Generated {tb.name} ({'exhaustive loop over' if ins <= 7 else '8 corner-case vectors for'} {ins} input bit(s)). Press F5 to run.", "ok")
+        kind = ("skeleton with an empty stimulus block" if skeleton
+                else f"{'exhaustive loop over' if ins <= 7 else '8 corner-case vectors for'} {ins} input bit(s)")
+        self.log(f"🧪 Generated {tb.name} ({kind}). Press F5 to run.", "ok")
 
     def new_module(self) -> None:
         if not self.work_dir:

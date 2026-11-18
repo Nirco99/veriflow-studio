@@ -780,8 +780,11 @@ def _lit(bits: int, value: int) -> str:
     return f"{bits}'b{value & ((1 << bits) - 1):0{bits}b}"
 
 
-def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, step: int | None = None) -> str:
-    """Build a complete <Module>_tb.v for the given parsed module."""
+def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, step: int | None = None,
+                                empty_stimulus: bool = False) -> str:
+    """Build a complete <Module>_tb.v for the given parsed module.
+
+    empty_stimulus=True gives a skeleton: declarations, DUT wiring, dump/monitor and an empty stimulus section."""
     name = module_info["module_name"]
     tb = f"{name}_tb"
     ports = module_info.get("ports", [])
@@ -812,7 +815,7 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
         L.append(f"    reg  {decl_range(p)}{p['name']};")
     for p in outs:
         L.append(f"    wire {decl_range(p)}{p['name']};")
-    if 0 < total <= 7:
+    if 0 < total <= 7 and not empty_stimulus:
         L.append("    integer i;")
     L.append("")
     if ports:
@@ -832,14 +835,17 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
         L += [f'        $display("{header}");', f'        $display("{"-" * max(len(header), 8)}");']
     fmt = " | ".join(f"{p['name']}=%b" for p in shown)
     sample = f'$display("{fmt}", {", ".join(p["name"] for p in shown)});' if shown else ""
-    settle = step != 10 and bool(shown)   # gate delays: $monitor would also print transient glitches
+    settle = step != 10 and bool(shown) and not empty_stimulus   # gate delays: $monitor would also print transient glitches
     if shown and not settle:
         L.append(f'        $monitor("{fmt}", {", ".join(p["name"] for p in shown)});')
     elif settle:
         L.append("        // outputs are sampled with $display after each step (settled values only, no glitches)")
     L.append("")
     after = f" {sample}" if settle else ""
-    if total == 0:
+    if empty_stimulus:
+        example = " ".join(f"{p['name']} = {_lit(bits(p), 0)};" for p in ins[:3]) or "// (no inputs)"
+        L += ["        // ---- apply your stimulus here, for example:", f"        // {example} #{step};", ""]
+    elif total == 0:
         L.append(f"        #{step};{after}")
     elif total <= 7:
         concat = "{" + ", ".join(p["name"] for p in ins) + "}"

@@ -61,6 +61,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
          "enabled": True, "builtin": True, "kind": "builtin"},
     ],
     "auto_resolve_packages_with_l_flag": True,
+    "live_check_on_save": True,          # background `iverilog -tnull` after every save
 }
 BUILTIN_PACKAGE_NAME = "Course Built-in Library (compstruct\\lib)"
 

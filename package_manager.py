@@ -22,7 +22,9 @@ from pathlib import Path
 
 from config_manager import BUILTIN_PACKAGE_NAME
 from verilog_parser import (PACKAGE_SOURCE_EXTS, build_global_module_index, parse_all_modules_in_file,
-                            resolve_required_library_files, strip_modules_from_source)
+                            parse_verilog_source, resolve_required_library_files, strip_modules_from_source)
+
+HEADER_EXTS = (".vh", ".svh")          # `include headers: copied with packages, exposed through -I, never indexed as modules
 
 DEFAULT_IMPORT_PACKAGE = "Imported_Course_Modules"
 MAX_ZIP_BYTES = 64 * 1024 * 1024          # refuse absurd archives (zip bombs)
@@ -120,73 +122,181 @@ class PackageManager:
             target = dest / f"{safe_name(hint)}_{name}"
         return target
 
-    def _summarize(self, entry: dict, files: list[Path], skipped: list[str]) -> dict:
-        modules = sorted({m["module_name"] for f in files for m in parse_all_modules_in_file(f)})
-        return {"package": entry["name"], "path": entry["path"], "files": [f.name for f in files],
-                "modules": modules, "skipped": skipped}
+    def _summarize(self, entry: dict | None, files: list[Path], skipped: list[str], blocked: list[dict]) -> dict:
+        modules = sorted({m["module_name"] for f in files if f.suffix.lower() in PACKAGE_SOURCE_EXTS
+                          for m in parse_all_modules_in_file(f)})
+        return {"package": entry["name"] if entry else None, "path": entry["path"] if entry else None,
+                "files": [f.name for f in files], "modules": modules, "skipped": skipped, "blocked": blocked}
 
+    # ------------------------------------------------------------------ global module registry
+    def module_map(self, include_disabled: bool = True) -> dict[str, str]:
+        """Map<ModuleName, AbsoluteFilePath> over every registered package (first definition wins).
+
+        Disabled packages count too: re-enabling one must never introduce a duplicate module declaration."""
+        idx = build_global_module_index(self._lib_specs(enabled_only=not include_disabled), None, self._cache)
+        return {n: str(Path(e["filepath"]).resolve()) for n, e in idx.items()}
+
+    @staticmethod
+    def _conflicts(text: str, target: Path, registry: dict[str, str]) -> list[dict]:
+        """Modules in `text` that the registry already maps to a different file (re-importing the same file is fine)."""
+        tkey = os.path.normcase(str(target.resolve()))
+        return [{"module": m["module_name"], "existing": registry[m["module_name"]]}
+                for m in parse_verilog_source(text)
+                if m["module_name"] in registry and os.path.normcase(registry[m["module_name"]]) != tkey]
+
+    @staticmethod
+    def _claim(text: str, target: Path, registry: dict[str, str]) -> None:
+        for m in parse_verilog_source(text):
+            registry.setdefault(m["module_name"], str(target.resolve()))
+
+    def _vet(self, label: str, text: str, target: Path, registry: dict[str, str], blocked: list[dict]) -> bool:
+        """True = accept (and reserve its module names for the rest of this batch); False = blocked."""
+        hits = self._conflicts(text, target, registry)
+        if hits:
+            blocked.append({"file": label, "conflicts": hits})
+            return False
+        self._claim(text, target, registry)
+        return True
+
+    def _finish(self, name: str, dest: Path, kind: str, copied: list[Path], skipped: list[str], blocked: list[dict]) -> dict:
+        known = self._find(str(dest)) >= 0
+        if not copied and not known:                     # everything blocked -> do not create an empty package
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+            return self._summarize(None, [], skipped, blocked)
+        return self._summarize(self._register(name, dest, kind), copied, skipped, blocked)
+
+    @staticmethod
+    def _read(path: Path) -> str:
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    # ------------------------------------------------------------------ imports (duplicate modules are blocked)
     def import_files_to_package(self, file_paths: list, package_name: str = DEFAULT_IMPORT_PACKAGE) -> dict:
-        """Copy .v/.sv files into the vault package `package_name` (created if needed)."""
+        """Copy .v/.sv modules (and .vh headers) into the vault package `package_name`.
+
+        A file defining a module that already exists in any registered package is *blocked* - iverilog would fail with
+        "Module X was already declared" - and reported in result["blocked"]."""
+        registry = self.module_map()
         dest = self.vault / safe_name(package_name)
         dest.mkdir(parents=True, exist_ok=True)
-        copied, skipped = [], []
+        copied, skipped, blocked = [], [], []
         for src in map(Path, file_paths):
-            if src.suffix.lower() not in PACKAGE_SOURCE_EXTS or not src.is_file():
+            ext = src.suffix.lower()
+            if ext not in PACKAGE_SOURCE_EXTS + HEADER_EXTS or not src.is_file():
                 skipped.append(src.name)
                 continue
             target = dest / src.name
+            if ext in PACKAGE_SOURCE_EXTS and not self._vet(src.name, self._read(src), target, registry, blocked):
+                continue
             if os.path.normcase(str(src.resolve())) != os.path.normcase(str(target.resolve())):
                 shutil.copy2(src, target)
             copied.append(target)
-        entry = self._register(safe_name(package_name), dest, "vault")
-        return self._summarize(entry, copied, skipped)
+        return self._finish(safe_name(package_name), dest, "vault", copied, skipped, blocked)
 
     def import_zip_package(self, zip_path, package_name: str | None = None) -> dict:
-        """Extract every .v/.sv from a course .zip (flattened, path-traversal safe) into a vault package."""
+        """Extract every .v/.sv/.vh from a course .zip (flattened, path-traversal safe) into a vault package."""
         zip_path = Path(zip_path)
         name = safe_name(package_name or zip_path.stem)
         dest = self.vault / name
         dest.mkdir(parents=True, exist_ok=True)
-        copied, skipped, total = [], [], 0
+        registry = self.module_map()
+        copied, skipped, blocked, total = [], [], [], 0
         with zipfile.ZipFile(zip_path) as zf:
             for info in zf.infolist():
                 parts = [p for p in re.split(r"[\\/]+", info.filename) if p]
                 if info.is_dir() or not parts or "__MACOSX" in parts or parts[-1].startswith("."):
                     continue
-                if Path(parts[-1]).suffix.lower() not in PACKAGE_SOURCE_EXTS:
+                ext = Path(parts[-1]).suffix.lower()
+                if ext not in PACKAGE_SOURCE_EXTS + HEADER_EXTS:
                     skipped.append(info.filename)
                     continue
                 total += info.file_size
                 if total > MAX_ZIP_BYTES or len(copied) >= MAX_FILES:
                     raise ValueError("archive too large for a Verilog package")
+                data = zf.read(info)
                 target = self._unique_target(dest, safe_name(parts[-1]), parts[-2] if len(parts) > 1 else "")
-                with zf.open(info) as fh, open(target, "wb") as out:
-                    shutil.copyfileobj(fh, out)
+                if ext in PACKAGE_SOURCE_EXTS and not self._vet(info.filename, data.decode("utf-8", "replace"),
+                                                                target, registry, blocked):
+                    continue
+                target.write_bytes(data)
                 copied.append(target)
-        entry = self._register(name, dest, "vault")
-        return self._summarize(entry, copied, skipped)
+        return self._finish(name, dest, "vault", copied, skipped, blocked)
 
     def add_external_library_folder(self, folder_path, name: str | None = None, copy_to_vault: bool = False) -> dict:
-        """Register a folder in place (linked, scanned recursively) or copy its .v files into the vault."""
+        """Register a folder in place (linked, scanned recursively) or copy its .v/.vh files into the vault.
+
+        A linked folder is all-or-nothing: if any of its modules is already registered elsewhere (or defined twice
+        inside the folder) the link is refused, because iverilog would see duplicate module declarations."""
         folder = Path(folder_path)
         if not folder.is_dir():
             raise ValueError(f"not a folder: {folder}")
         display = (name or folder.name).strip() or folder.name
         name = safe_name(display)                 # folder-safe name only matters for vault copies
+        registry = self.module_map()
+        files = sorted((p for p in folder.rglob("*") if p.suffix.lower() in PACKAGE_SOURCE_EXTS + HEADER_EXTS and p.is_file()),
+                       key=lambda p: str(p).lower())[:MAX_FILES]
+        blocked: list[dict] = []
         if not copy_to_vault:
-            entry = self._register(display, folder, "linked")
-            files = [p for p in folder.rglob("*") if p.suffix.lower() in PACKAGE_SOURCE_EXTS and p.is_file()][:MAX_FILES]
-            return self._summarize(entry, files, [])
+            if self._find(str(folder)) < 0:
+                for f in files:
+                    if f.suffix.lower() in PACKAGE_SOURCE_EXTS:
+                        self._vet(str(f.relative_to(folder)), self._read(f), f, registry, blocked)
+            if blocked:
+                return self._summarize(None, [], [], blocked)
+            return self._summarize(self._register(display, folder, "linked"), files, [], [])
         dest = self.vault / name
         dest.mkdir(parents=True, exist_ok=True)
         copied = []
-        for src in folder.rglob("*"):
-            if src.suffix.lower() in PACKAGE_SOURCE_EXTS and src.is_file() and len(copied) < MAX_FILES:
-                target = self._unique_target(dest, src.name, src.parent.name if src.parent != folder else "")
-                shutil.copy2(src, target)
-                copied.append(target)
-        entry = self._register(name, dest, "vault")
-        return self._summarize(entry, copied, [])
+        for src in files:
+            target = self._unique_target(dest, src.name, src.parent.name if src.parent != folder else "")
+            if src.suffix.lower() in PACKAGE_SOURCE_EXTS and not self._vet(str(src.relative_to(folder)), self._read(src),
+                                                                           target, registry, blocked):
+                continue
+            shutil.copy2(src, target)
+            copied.append(target)
+        return self._finish(name, dest, "vault", copied, [], blocked)
+
+    def include_dirs(self) -> list[str]:
+        """Folders of enabled packages that hold `include headers (.vh/.svh) -> passed to iverilog with -I."""
+        out: list[str] = []
+        for p in self.packages():
+            if not (p["enabled"] and p["exists"]):
+                continue
+            root = Path(p["path"])
+            for f in (root.rglob("*") if p["kind"] == "linked" else root.iterdir()):
+                if f.suffix.lower() in HEADER_EXTS and f.is_file() and str(f.parent) not in out:
+                    out.append(str(f.parent))
+        return out
+
+    def editor_collisions(self, path, text: str, work_dir, extra_files: list | tuple = ()) -> list[dict]:
+        """Live duplicate-module check for an (unsaved) editor buffer - catches a module renamed in the editor
+        to a name another workspace file or a package already uses."""
+        path = Path(path)
+        diags: list[dict] = []
+        if not work_dir:
+            return diags
+        ws = build_global_module_index([], work_dir, self._cache, exclude_files=[path])
+        pk = self.build_index(None)
+        extras = {os.path.normcase(str(Path(work_dir) / f)) for f in extra_files}
+        for m in parse_verilog_source(text):
+            n = m["module_name"]
+            if n in ws:
+                other = Path(ws[n]["filepath"])
+                compiled = os.path.normcase(str(other)) in extras
+                diags.append({"file": str(path), "line": m["line"], "col": 0, "source": "registry", "code": "duplicate-module",
+                              "severity": "error" if compiled else "warning",
+                              "message": f"Module '{n}' is also defined in {other.name} - "
+                                         + ("both are compiled, iverilog will fail with 'already declared'; rename one"
+                                            if compiled else "rename one of them (iverilog fails with 'already declared' "
+                                                             "if both files are ever compiled together)")})
+            elif n in pk:
+                diags.append({"file": str(path), "line": m["line"], "col": 0, "source": "registry", "code": "shadows-package",
+                              "severity": "info",
+                              "message": f"Module '{n}' also exists in package '{pk[n]['package_name']}' "
+                                         f"({Path(pk[n]['filepath']).name}) - your definition is used, the package copy is masked"})
+        return diags
 
     # ------------------------------------------------------------------ indexing & resolution
     def _lib_specs(self, enabled_only: bool = True) -> list[dict]:
