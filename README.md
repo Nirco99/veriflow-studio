@@ -196,7 +196,7 @@ linter, truth table and waveform can be explored on any machine. Lecturer module
 #### Option A — run from source
 
 ```bash
-git clone https://github.com/<your-username>/veriflow-studio.git
+git clone https://github.com/Nirco99/veriflow-studio.git
 cd veriflow-studio
 pip install -r requirements.txt
 python main.py
@@ -523,7 +523,7 @@ Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגל
 <div dir="ltr" align="left">
 
 ```bash
-git clone https://github.com/<your-username>/veriflow-studio.git
+git clone https://github.com/Nirco99/veriflow-studio.git
 cd veriflow-studio
 pip install -r requirements.txt
 python main.py
