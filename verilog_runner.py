@@ -407,7 +407,7 @@ class VerilogRunner:
         if pm is None:
             add_y(c["lib_dir"])
         else:
-            for d in c.get_all_enabled_library_dirs():
+            for d in pm.y_search_dirs():        # packages (tier 2) then the course library (tier 3); unsafe folders skipped
                 add_y(d)
             if c["auto_resolve_packages_with_l_flag"]:
                 try:

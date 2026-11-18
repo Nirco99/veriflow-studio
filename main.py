@@ -24,8 +24,9 @@ from config_manager import (ACCENT, APP_NAME, APP_VERSION, CHOICES, DARK_SCHEME,
                             STOP_RED_HOVER, VS, VSCODE_THEMES, ConfigManager, detect_toolchains, resource_dir)
 from ui_components import (SNIPPETS, ActivityBar, MiniWaveformViewer, PanelTabs, SideSection, TruthTableGrid,
                            VerilogCodeEditor, entry_style, ghost_button, hline, icon_button, is_dark, option_style,
-                           seg_style, slim_scrollbar, style_treeview, ui_scale, vline)
-from verilog_parser import (describe_ports, generate_testbench_skeleton, instantiation_template, new_module_template,
+                           PinoutDiagram, seg_style, slim_scrollbar, style_treeview, ui_scale, vline)
+from verilog_parser import (analyze_hierarchy, describe_ports, generate_testbench_skeleton, instantiation_template,
+                            new_module_template,
                             parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
 from verilog_runner import NO_WINDOW, STATUS_FAIL, STATUS_XZ, VerilogRunner, clean_binaries, format_cmd
 from package_manager import DEFAULT_IMPORT_PACKAGE, PackageManager
@@ -293,7 +294,7 @@ class PackageManagerDialog(ctk.CTkToplevel):
         for r, (p, mods) in enumerate(self.pkg.modules_by_package(), start=1):
             var = tk.BooleanVar(value=p["enabled"])
             ctk.CTkCheckBox(self.list, text="", variable=var, width=20, checkbox_width=15, checkbox_height=15, corner_radius=2,
-                            border_width=1, command=lambda n=p["name"], v=var: self.pkg.toggle_package_enabled(n, v.get())).grid(
+                            border_width=1, command=lambda n=p["name"], v=var: self.app.set_package_enabled(n, v.get())).grid(
                 row=r, column=0, padx=8, pady=4)
             cell = ctk.CTkFrame(self.list, fg_color="transparent")
             cell.grid(row=r, column=1, sticky="ew", pady=4)
@@ -321,6 +322,54 @@ class PackageManagerDialog(ctk.CTkToplevel):
             self.app.log(f"📦 {res['message']}", "ok" if res["ok"] else "warn")
 
 
+# =========================================================================== self-checking testbench dialog
+class SelfCheckDialog(ctk.CTkToplevel):
+    """Ask for the expected expression of each output; generates PASS/FAIL checks after every vector."""
+
+    def __init__(self, app: "VeriFlowApp", info: dict):
+        super().__init__(app)
+        self.app, self.info = app, info
+        self.title(f"Self-Checking Testbench - {info['module_name']}")
+        self.geometry("720x460")
+        self.transient(app)
+        self.configure(fg_color=VS["editor"])
+        self.grid_columnconfigure(1, weight=1)
+        ins = ", ".join(p["name"] + (p["range_text"] or "") for p in info["ports"] if p["direction"] == "input")
+        ctk.CTkLabel(self, text="Expected value of each output (Verilog expression over the inputs)", anchor="w",
+                     font=font(14, "bold"), text_color=VS["text"]).grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(14, 2))
+        ctk.CTkLabel(self, text=f"Inputs: {ins}\nExamples:  a ^ b ^ cin      (a & b) | (cin & (a ^ b))      a + b      s ? d1 : d0\n"
+                                "Leave an output empty to skip its check.", anchor="w", justify="left",
+                     text_color=VS["muted"], font=font(12)).grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(0, 10))
+        self.entries: dict[str, ctk.CTkEntry] = {}
+        r = 2
+        for p in info["ports"]:
+            if p["direction"] == "input":
+                continue
+            ctk.CTkLabel(self, text=f"{p['name']}{p['range_text']} =", anchor="e", text_color=VS["text"],
+                         font=("Consolas", 13)).grid(row=r, column=0, sticky="e", padx=(16, 8), pady=4)
+            e = ctk.CTkEntry(self, height=28, font=("Consolas", 13), **entry_style())
+            e.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=4)
+            self.entries[p["name"]] = e
+            r += 1
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.grid(row=r, column=0, columnspan=2, sticky="e", padx=16, pady=14)
+        ghost_button(btns, "Cancel", self.destroy, width=90).pack(side="left", padx=6)
+        ctk.CTkButton(btns, text="🧪 Generate", width=120, height=28, corner_radius=3, fg_color=RUN_GREEN,
+                      hover_color=RUN_GREEN_HOVER, command=self._ok).pack(side="left")
+        if self.entries:
+            next(iter(self.entries.values())).focus_set()
+        self.bind("<Return>", lambda e: self._ok())
+        self.after(120, self.lift)
+
+    def _ok(self) -> None:
+        checks = {k: e.get().strip() for k, e in self.entries.items() if e.get().strip()}
+        if not checks:
+            messagebox.showinfo("Self-checking testbench", "Enter at least one expected expression.", parent=self)
+            return
+        self.destroy()
+        self.app.generate_tb(checks=checks)
+
+
 # =========================================================================== main window
 class VeriFlowApp(ctk.CTk):
     def __init__(self):
@@ -343,6 +392,9 @@ class VeriFlowApp(ctk.CTk):
         self._pkg_collapsed: set[str] = set()
         self._pkg_stats = (0, 0)
         self._pkg_dialog: PackageManagerDialog | None = None
+        self._known_cache: dict[str, dict] = {}
+        self._hier_items: dict[str, tuple[str | None, int, dict | None]] = {}
+        self._hier_job = None
         self.live_diags: list[dict] = []
         self._links: dict[str, tuple[str, int, int]] = {}
         self._live_job = None
@@ -492,6 +544,9 @@ class VeriFlowApp(ctk.CTk):
         self.tb_ed.on_generate = self.generate_tb
         self.design_ed.add_menu_command("🧪 Generate Testbench (exhaustive)", lambda: self.generate_tb())
         self.design_ed.add_menu_command("🧪 Generate Skeleton Testbench (empty initial)", lambda: self.generate_tb(skeleton=True))
+        self.design_ed.add_menu_command("🧪 Generate Self-Checking Testbench…", lambda: self.self_check_dialog())
+        for ed in (self.design_ed, self.tb_ed):
+            ed.completion_provider = lambda: list(self._known_cache.values())
         self.active_editor = self.design_ed
         self.vpane.add(self.ed_area, minsize=int(200 * sc), stretch="always")
         self.vpane.add(self._build_panel(self.vpane), minsize=int(150 * sc), height=int(300 * sc))
@@ -521,7 +576,7 @@ class VeriFlowApp(ctk.CTk):
         v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
         v.grid_columnconfigure(0, weight=1)
         self.explorer_title = self._side_header(v, "EXPLORER", [("+", self.new_module), ("↻", self._refresh_workspace),
-                                                                ("📂", self.choose_folder)])
+                                                                ("📂", self.choose_folder), ("📤", self.export_submission)])
         weights = {1: 3, 2: 1}
 
         def toggled(sec):
@@ -541,7 +596,8 @@ class VeriFlowApp(ctk.CTk):
             v.grid_rowconfigure(r, weight=w)
         self.ws_label = ctk.CTkLabel(v, text="No folder open", anchor="w", justify="left", wraplength=230,
                                      text_color=VS["muted"], font=font(10))
-        self.ws_label.grid(row=3, column=0, sticky="ew", padx=14, pady=(2, 6))
+        self.ws_label.grid(row=3, column=0, sticky="ew", padx=14, pady=(2, 2))
+        ghost_button(v, "📦 Export HW .zip", self.export_submission, height=26).grid(row=4, column=0, sticky="ew", padx=10, pady=(2, 8))
         return v
 
     def _build_library(self, parent) -> ctk.CTkFrame:
@@ -628,6 +684,7 @@ class VeriFlowApp(ctk.CTk):
         t_prob = self.panel.add("problems", "Problems & Linter")
         t_table = self.panel.add("table", "Truth Table")
         t_wave = self.panel.add("wave", "Waveform")
+        t_hier = self.panel.add("hier", "Hierarchy & Gates")
         r = self.panel.right
         r.grid_columnconfigure(1, weight=1)
         r.grid_rowconfigure(0, weight=1)
@@ -665,6 +722,30 @@ class VeriFlowApp(ctk.CTk):
         self.truth.grid(row=0, column=0, sticky="nsew")
         self.wave = MiniWaveformViewer(t_wave, self.cfg, on_open_gtkwave=self.open_gtkwave)
         self.wave.grid(row=0, column=0, sticky="nsew")
+        hf = ctk.CTkFrame(t_hier, fg_color="transparent", corner_radius=0)
+        hf.grid(row=0, column=0, sticky="nsew")
+        hf.grid_columnconfigure(0, weight=3)
+        hf.grid_columnconfigure(2, weight=2, minsize=int(380 * self.sc))     # room for the pinout diagram
+        hf.grid_rowconfigure(1, weight=1)
+        hbar = ctk.CTkFrame(hf, fg_color="transparent")
+        hbar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
+        ghost_button(hbar, "↻ Refresh", self._refresh_hierarchy, height=24).pack(side="left")
+        self.hier_summary = ctk.CTkLabel(hbar, text="", anchor="w", justify="left", text_color=VS["text"], font=font(12))
+        self.hier_summary.pack(side="left", padx=12)
+        self.hier_tree = ttk.Treeview(hf, columns=("type", "where"), show="tree headings", style="VF.Treeview")
+        self.hier_tree.heading("#0", text="Instance", anchor="w")
+        self.hier_tree.heading("type", text="Module / gate", anchor="w")
+        self.hier_tree.heading("where", text="Defined in", anchor="w")
+        self.hier_tree.column("#0", width=int(200 * self.sc), anchor="w")
+        self.hier_tree.column("type", width=int(150 * self.sc), anchor="w")
+        self.hier_tree.column("where", width=int(230 * self.sc), anchor="w", stretch=True)
+        self.hier_tree.grid(row=1, column=0, sticky="nsew", padx=(8, 0))
+        hsb2 = slim_scrollbar(hf, self.hier_tree.yview)
+        hsb2.grid(row=1, column=1, sticky="ns")
+        self.hier_tree.configure(yscrollcommand=hsb2.set)
+        self.hier_tree.bind("<ButtonRelease-1>", self._on_hier_click)
+        self.pinout = PinoutDiagram(hf, self.cfg)
+        self.pinout.grid(row=1, column=2, sticky="nsew", padx=8)
         self.panel.set_badge("problems", 0)
         return self.panel
 
@@ -1206,6 +1287,12 @@ class VeriFlowApp(ctk.CTk):
         self.st_pos.configure(text=f"Ln {line}, Col {col}")
         if msg:
             self.st_msg.configure(text=msg.splitlines()[0][:160])
+            return
+        word = ed.word_at_cursor()
+        info = self._known_cache.get(word)
+        if info and info.get("ports") is not None:
+            sig = ", ".join(f"{p['direction']} {p['range_text'] + ' ' if p['range_text'] else ''}{p['name']}" for p in info["ports"])
+            self.st_msg.configure(text=f"◆ {word} ({sig})  ·  {info.get('package_name', '')}"[:170])
 
     def _on_editor_focus(self, ed: VerilogCodeEditor) -> None:
         self.active_editor = ed
@@ -1245,7 +1332,7 @@ class VeriFlowApp(ctk.CTk):
             lab.bind("<Button-1>", lambda e, n=pkg["name"]: self._toggle_pkg_collapsed(n))
             var = tk.BooleanVar(value=pkg["enabled"])
             ctk.CTkCheckBox(head, text="", variable=var, width=18, checkbox_width=14, checkbox_height=14, corner_radius=2,
-                            border_width=1, command=lambda n=pkg["name"], vv=var: self.pkg.toggle_package_enabled(n, vv.get())).grid(
+                            border_width=1, command=lambda n=pkg["name"], vv=var: self.set_package_enabled(n, vv.get())).grid(
                 row=0, column=1, padx=(0, 8))
             if not pkg["exists"]:
                 ctk.CTkLabel(self.lib_list, text="      folder not found", anchor="w", text_color=ACCENT["err"],
@@ -1280,20 +1367,23 @@ class VeriFlowApp(ctk.CTk):
 
     def _preview_module(self, m: dict) -> None:
         """Read-only source preview of a package module (double-click in the library)."""
-        path = Path(m["filepath"])
+        self._preview_file(Path(m["filepath"]), m.get("line") or 1, m["module_name"])
+
+    def _preview_file(self, path: Path, line: int = 1, title: str | None = None) -> None:
+        """Read-only editor window on any .v file (library modules, hierarchy clicks)."""
         try:
             text, _nl = read_source(path)
         except OSError as exc:
             messagebox.showerror("Preview", f"Cannot read {path}:\n{exc}", parent=self)
             return
         win = ctk.CTkToplevel(self)
-        win.title(f"{m['module_name']} - {path.name}  (read-only)")
+        win.title(f"{title + ' - ' if title else ''}{path.name}  (read-only)")
         win.geometry("860x640")
         win.transient(self)
         ed = VerilogCodeEditor(win, self.cfg, role="DESIGN")
         ed.pack(fill="both", expand=True)
         ed.set_content(text, str(path))
-        ed.goto_line(m.get("line") or 1)
+        ed.goto_line(line or 1)
         ed.text.configure(state="disabled")
         win.after(150, win.lift)
 
@@ -1333,26 +1423,35 @@ class VeriFlowApp(ctk.CTk):
             messagebox.showerror("Import failed", str(exc), parent=self)
             return
         mods = r["modules"]
-        for b in r.get("blocked", []):
-            for c in b["conflicts"]:
-                self.log(f"⛔ blocked {b['file']}: module '{c['module']}' is already registered in {c['existing']} "
-                         f"(iverilog would fail with 'already declared')", "warn")
+        dups = r.get("duplicates", [])
+        for d in dups:
+            self.log(f"   ↷ skipped duplicate '{d['module']}' in {d['file']} - already provided by "
+                     f"{self._package_of(d['existing'])} ({Path(d['existing']).name})", "dim")
         if r["skipped"]:
             self.log(f"   skipped (not .v/.sv/.vh): {', '.join(r['skipped'][:12])}", "dim")
-        if r.get("blocked"):
-            names = sorted({c["module"] for b in r["blocked"] for c in b["conflicts"]})
-            self.toast(f"⛔ {len(r['blocked'])} file(s) blocked - duplicate module(s): {', '.join(names[:6])}"
-                       f"{' …' if len(names) > 6 else ''}. See the Console for where each is already defined.", "warn")
-            self.panel.set("console")
+        by_pkg: dict[str, list[str]] = {}
+        for d in dups:
+            by_pkg.setdefault(self._package_of(d["existing"]), []).append(d["module"])
+        skipped_txt = "; ".join(f"{len(v)} already provided by {k}: {', '.join(sorted(set(v))[:6])}" for k, v in by_pkg.items())
         if r["package"] is None:
-            self.st_msg.configure(text="Nothing loaded - every module in the selection is already registered")
+            self.st_msg.configure(text="Nothing new loaded - every module in the selection is already provided")
+            self.toast(f"Nothing new loaded - all modules are already provided ({skipped_txt})", "warn")
+            self.panel.set("console")
             return
-        self.log(f"📦 Package '{r['package']}': {len(r['files'])} file(s), {len(mods)} module(s) - "
-                 f"{', '.join(mods[:24])}{' …' if len(mods) > 24 else ''}", "ok")
-        self.st_msg.configure(text=f"Package '{r['package']}' loaded - {len(mods)} modules usable from any folder")
-        if not r.get("blocked"):
-            self.toast(f"📦 Package '{r['package']}' loaded - {len(mods)} module(s) usable from any folder", "ok")
+        msg = (f"Loaded {len(mods)} new module(s) from {r['package']}"
+               + (f" (skipped {len(dups)} duplicate{'s' if len(dups) != 1 else ''} - {skipped_txt})" if dups else ""))
+        self.log(f"📦 {msg}: {', '.join(mods[:24])}{' …' if len(mods) > 24 else ''}", "ok")
+        self.st_msg.configure(text=msg[:170])
+        self.toast(("📦 " + msg) if not dups else ("📦 " + msg + ". Details in the Console."), "ok" if not dups else "info")
         self._show_view("library", force=True)
+
+    def _package_of(self, path: str) -> str:
+        key = os.path.normcase(os.path.abspath(path))
+        for p in self.pkg.packages():
+            root = os.path.normcase(os.path.abspath(p["path"]))
+            if key.startswith(root + os.sep):
+                return "compstruct\\lib" if p["kind"] == "builtin" else f"'{p['name']}'"
+        return Path(path).parent.name
 
     def open_package_manager(self) -> None:
         if self._pkg_dialog is not None and self._pkg_dialog.winfo_exists():
@@ -1396,14 +1495,10 @@ class VeriFlowApp(ctk.CTk):
     def run_lint(self, show: bool = False) -> list[dict]:
         self._lint_job = None
         self.lint_diags = []
+        known = self._index_with_editors() if self.module else {}     # unsaved buffers win (renames seen at once)
+        self._schedule_hierarchy()
         if self.cfg["enable_course_linter"] and self.module:
-            known = self._known_modules()
             eds = [ed for ed in (self.design_ed, self.tb_ed) if ed.path and (Path(ed.path).exists() or ed.get_content().strip())]
-            for ed in eds:                     # unsaved buffers win: a module renamed in the editor is seen at once
-                for name in [n for n, e in known.items() if os.path.normcase(str(e["filepath"])) == os.path.normcase(ed.path)]:
-                    del known[name]
-                for m in parse_verilog_source(ed.get_content(), ed.path):
-                    known[m["module_name"]] = {**m, "filepath": Path(ed.path), "package_name": "Workspace", "needs_l_flag": False}
             for ed in eds:
                 self.lint_diags += run_course_linter(ed.path, known, self.cfg["strict_gate_level_mode"], text=ed.get_content())
                 self.lint_diags += self.pkg.editor_collisions(ed.path, ed.get_content(), self.work_dir, self._extra_files())
@@ -1625,7 +1720,8 @@ class VeriFlowApp(ctk.CTk):
             else:
                 self.wave.clear("No VCD and no truth-table rows to draw")
         counts = table.get("counts", {})
-        rows, xz, fail = len(table["rows"]), counts.get(STATUS_XZ, 0), counts.get(STATUS_FAIL, 0) + len(table.get("fail_messages", []))
+        extra_fail = [m for m in table.get("fail_messages", []) if not m.startswith("SELF-CHECK:")]   # summary line != a failure
+        rows, xz, fail = len(table["rows"]), counts.get(STATUS_XZ, 0), counts.get(STATUS_FAIL, 0) + len(extra_fail)
         if timed_out:
             t = p.get("timeout", self.cfg["sim_timeout_sec"])
             self.log(f"⏱ Simulation killed after {t:.1f}s timeout - the testbench probably has no $finish, waits forever, "
@@ -1646,6 +1742,7 @@ class VeriFlowApp(ctk.CTk):
         self.log(("✔ Simulation OK - " if ok else "⚠ Simulation finished - ") + summary + f"  ({p.get('duration', 0):.2f}s)",
                  "ok" if ok else "warn")
         self._set_status("ready", ("✔ " if ok else "⚠ ") + summary)
+        self._schedule_hierarchy()
         self.panel.set("table" if rows else "console")
 
     @staticmethod
@@ -1749,6 +1846,7 @@ class VeriFlowApp(ctk.CTk):
         m.add_separator()
         m.add_command(label="🧪 Generate Testbench (exhaustive)", command=lambda: self._tb_for(name, False))
         m.add_command(label="🧪 Generate Skeleton Testbench (empty initial)", command=lambda: self._tb_for(name, True))
+        m.add_command(label="🧪 Generate Self-Checking Testbench…", command=lambda: self.self_check_dialog(name))
         m.add_separator()
         m.add_command(label="📝 Open in Notepad++", command=lambda: (self.select_module(name), self.open_in_npp()))
         m.add_command(label="📂 Reveal in Explorer", command=lambda: self.open_folder(self.work_dir))
@@ -1767,9 +1865,157 @@ class VeriFlowApp(ctk.CTk):
     def _on_btab(self) -> None:
         if self.panel.get() == "wave":
             self.after(30, self.wave.render)
+        elif self.panel.get() == "hier":
+            self.after(30, self._refresh_hierarchy)
+
+    # ---- hierarchy & gate count & pinout
+    def _schedule_hierarchy(self) -> None:
+        if self.panel.get() == "hier":
+            if self._hier_job:
+                self.after_cancel(self._hier_job)
+            self._hier_job = self.after(400, self._refresh_hierarchy)
+
+    def _refresh_hierarchy(self) -> None:
+        self._hier_job = None
+        self.hier_tree.delete(*self.hier_tree.get_children())
+        self._hier_items = {}
+        mods = parse_verilog_source(self.design_ed.get_content(), self.design_ed.path or "") if self.module else []
+        if not mods:
+            self.hier_summary.configure(text="Open a module to see its hierarchy")
+            self.pinout.set_module(None)
+            return
+        known = self._index_with_editors()
+        root = next((m for m in mods if m["module_name"] == self.module), mods[0])
+        h = analyze_hierarchy(root["module_name"], known)
+
+        def where(node: dict) -> str:
+            if node.get("primitive"):
+                return "Verilog primitive"
+            if node.get("missing"):
+                return "⚠ not found"
+            pkg = node.get("package") or ""
+            return f"{Path(node['file']).name}  ({pkg})" if node.get("file") else pkg
+
+        def add(parent: str, node: dict, is_root: bool = False) -> None:
+            label = node["type"] if is_root else (node["name"] or "(unnamed)")
+            iid = self.hier_tree.insert(parent, "end", text=("⬢ " if not node["primitive"] else "· ") + label,
+                                        values=(node["type"].upper() if node["primitive"] else node["type"], where(node)),
+                                        open=is_root or len(node["children"]) <= 8)
+            target = (node.get("inst_file"), node.get("inst_line", 0)) if node["primitive"] else (node.get("file"), node.get("line", 0))
+            if node["primitive"]:
+                target = (node.get("file"), node.get("line", 0))
+            self._hier_items[iid] = (target[0], target[1] or 1, None if node["primitive"] else known.get(node["type"]))
+            for ch in node["children"]:
+                add(iid, ch)
+        add("", h["tree"], is_root=True)
+        g = " · ".join(f"{k.upper()} {v}" for k, v in h["gates"].items() if v) or "no primitive gates"
+        extra = " · ".join(f"{k} {v}" for k, v in h["other_primitives"].items())
+        miss = f"   ⚠ missing: {', '.join(h['missing'])}" if h["missing"] else ""
+        self.hier_summary.configure(text=f"{h['total_gates']} gates ({g}{' · ' + extra if extra else ''})   ·   "
+                                         f"{h['instances']} sub-module instances   ·   est. logic depth ~{h['depth']} levels{miss}")
+        self.pinout.set_module(root, h["total_gates"], h["depth"])
+
+    def _on_hier_click(self, _e=None) -> None:
+        sel = self.hier_tree.selection()
+        if not sel or sel[0] not in self._hier_items:
+            return
+        f, line, _info = self._hier_items[sel[0]]
+        if f:
+            self._open_location(f, line)
+
+    def _open_location(self, f: str, line: int) -> None:
+        key = os.path.normcase(os.path.abspath(f))
+        for ed in (self.design_ed, self.tb_ed):
+            if ed.path and os.path.normcase(os.path.abspath(ed.path)) == key:
+                self._show_editor(ed)
+                ed.goto_line(line)
+                return
+        self._preview_file(Path(f), line)
+
+    def _index_with_editors(self) -> dict[str, dict]:
+        """Global index (workspace + enabled packages) with the unsaved editor buffers layered on top."""
+        known = self._known_modules()
+        for ed in (self.design_ed, self.tb_ed):
+            if not ed.path:
+                continue
+            for name in [n for n, e in known.items() if os.path.normcase(str(e["filepath"])) == os.path.normcase(ed.path)]:
+                del known[name]
+            for m in parse_verilog_source(ed.get_content(), ed.path):
+                known[m["module_name"]] = {**m, "filepath": Path(ed.path), "package_name": "Workspace", "needs_l_flag": False}
+        self._known_cache = known
+        return known
+
+    # ---- package enable/disable with conflict check
+    def set_package_enabled(self, name: str, enabled: bool) -> None:
+        res = self.pkg.toggle_package_enabled(name, enabled)
+        if not res["ok"] and res.get("conflicts"):
+            mods = ", ".join(sorted({c["module"] for c in res["conflicts"]}))
+            others = sorted({c["package"] for c in res["conflicts"]})
+            if messagebox.askyesno("Package conflict",
+                                   f"Can't enable '{name}': it defines {mods}, which "
+                                   f"{', '.join(others)} already provide{'s' if len(others) == 1 else ''}.\n\n"
+                                   f"iverilog fails when a module is defined twice.\n\n"
+                                   f"Disable {', '.join(others)} and enable '{name}' instead?", parent=self):
+                res = self.pkg.toggle_package_enabled(name, True, force=True)
+                self.log(f"📦 enabled '{name}', disabled {', '.join(res['disabled'])} (duplicate {mods})", "warn")
+            else:
+                self.toast(f"'{name}' stays disabled - {mods} already provided by {', '.join(others)}", "warn")
+            self._load_library()
+            if self._pkg_dialog is not None and self._pkg_dialog.winfo_exists():
+                self._pkg_dialog.refresh()
+
+    # ---- self-checking testbench
+    def self_check_dialog(self, name: str | None = None) -> None:
+        if name and name != self.module:
+            self.select_module(name)
+            if self.module != name:
+                return
+        if not self.module or not self.work_dir:
+            return
+        info = parse_verilog_module(self.work_dir / f"{self.module}.v", self.design_ed.get_content())
+        if not info.get("module_name"):
+            messagebox.showerror("Self-checking testbench", f"Cannot parse {self.module}.v", parent=self)
+            return
+        SelfCheckDialog(self, info)
+
+    # ---- homework submission packager
+    def export_submission(self) -> None:
+        if not self.work_dir:
+            messagebox.showinfo(APP_NAME, "Open a workspace folder first.", parent=self)
+            return
+        self.save_all(quiet=True)
+        plan = self.pkg.submission_plan(self.work_dir)
+        if not plan["files"]:
+            messagebox.showinfo("Export HW .zip", "No .v files in this folder.", parent=self)
+            return
+        include = True
+        if plan["helpers"]:
+            lst = "\n".join(f"  • {h['module']}   (package '{h['package']}')" for h in plan["helpers"][:15])
+            ans = messagebox.askyesnocancel(
+                "Export HW .zip", f"Your design uses {len(plan['helpers'])} module(s) that are NOT in the course library "
+                                  f"and NOT in this folder:\n\n{lst}\n\nThe grader will not have them.\n"
+                                  f"Include them in the zip (one file per module)?", parent=self)
+            if ans is None:
+                return
+            include = ans
+        out = filedialog.asksaveasfilename(parent=self, title="Save homework submission", defaultextension=".zip",
+                                           initialdir=str(self.work_dir.parent), initialfile=f"{self.work_dir.name}_Submission.zip",
+                                           filetypes=[("Zip archive", "*.zip")])
+        if not out:
+            return
+        try:
+            r = self.pkg.build_submission_zip(self.work_dir, out, include_helpers=include, plan=plan)
+        except OSError as exc:
+            messagebox.showerror("Export HW .zip", str(exc), parent=self)
+            return
+        self.log(f"📦 Exported {r['zip']}: {', '.join(r['files'] + r['helpers'])}", "ok")
+        if r["excluded"]:
+            self.log(f"   left out (binaries, .vcd, temp files): {', '.join(r['excluded'][:20])}", "dim")
+        self.toast(f"📦 {Path(r['zip']).name} ready - {len(r['files']) + len(r['helpers'])} file(s)"
+                   + (f" incl. {len(r['helpers'])} helper module(s)" if r["helpers"] else ""), "ok")
 
     # ================================================================== tools
-    def generate_tb(self, skeleton: bool = False) -> None:
+    def generate_tb(self, skeleton: bool = False, checks: dict | None = None) -> None:
         if not self.module or not self.work_dir:
             return
         design = self.work_dir / f"{self.module}.v"
@@ -1783,7 +2029,7 @@ class VeriFlowApp(ctk.CTk):
                 return
         if info["module_name"] != self.module:
             self.log(f"Note: file {design.name} declares module '{info['module_name']}' - the testbench instantiates that name.", "warn")
-        tb.write_text(generate_testbench_skeleton(info, empty_stimulus=skeleton), encoding="utf-8")
+        tb.write_text(generate_testbench_skeleton(info, empty_stimulus=skeleton, checks=checks), encoding="utf-8")
         self._scan_workspace(force=True)
         self._load_editor(self.tb_ed, tb)
         self.tb_ed.set_missing(False)
@@ -1791,8 +2037,9 @@ class VeriFlowApp(ctk.CTk):
         self._show_editor(self.tb_ed)
         self.run_lint()
         ins = sum(p["bits"] or 1 for p in info["ports"] if p["direction"] == "input")
-        kind = ("skeleton with an empty stimulus block" if skeleton
-                else f"{'exhaustive loop over' if ins <= 7 else '8 corner-case vectors for'} {ins} input bit(s)")
+        kind = ("skeleton with an empty stimulus block" if skeleton and not checks
+                else f"{'exhaustive loop over' if ins <= 7 else '8 corner-case vectors for'} {ins} input bit(s)"
+                + (f", self-checking {', '.join(checks)}" if checks else ""))
         self.log(f"🧪 Generated {tb.name} ({kind}). Press F5 to run.", "ok")
 
     def new_module(self) -> None:

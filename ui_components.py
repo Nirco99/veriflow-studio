@@ -50,10 +50,16 @@ SNIPPETS: dict[str, str] = {
 # Windows virtual-key codes -> action (works with Hebrew / any non-Latin keyboard layout)
 _VK = {83: "save", 70: "find", 72: "replace", 71: "goto", 191: "comment", 68: "dup", 187: "zoom_in", 107: "zoom_in",
        189: "zoom_out", 109: "zoom_out", 48: "zoom_reset", 96: "zoom_reset", 90: "undo", 89: "redo", 65: "select_all",
-       67: "copy", 86: "paste", 88: "cut"}
+       67: "copy", 86: "paste", 88: "cut", 32: "complete"}
 _KS = {"s": "save", "f": "find", "h": "replace", "g": "goto", "slash": "comment", "d": "dup", "equal": "zoom_in",
        "plus": "zoom_in", "kp_add": "zoom_in", "minus": "zoom_out", "kp_subtract": "zoom_out", "0": "zoom_reset",
-       "z": "undo", "y": "redo", "a": "select_all", "c": "copy", "v": "paste", "x": "cut"}
+       "z": "undo", "y": "redo", "a": "select_all", "c": "copy", "v": "paste", "x": "cut", "space": "complete"}
+COMPLETION_WORDS = ["module", "endmodule", "input", "output", "inout", "wire", "reg", "logic", "integer", "genvar",
+                    "parameter", "localparam", "assign", "always", "always_comb", "initial", "begin", "end", "if", "else",
+                    "for", "case", "endcase", "default", "posedge", "negedge", "generate", "endgenerate",
+                    "and", "or", "nand", "nor", "xor", "xnor", "not", "buf",
+                    "$display", "$monitor", "$strobe", "$finish", "$stop", "$time", "$dumpfile", "$dumpvars", "$random",
+                    "$readmemb", "$readmemh"]
 
 
 def ui_scale(widget) -> float:
@@ -203,6 +209,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
         self.on_save, self.on_modified, self.on_cursor, self.on_zoom, self.on_focus = on_save, on_modified, on_cursor, on_zoom, on_focus
         self.on_generate: Callable | None = None
         self.on_app_ctrl: Callable | None = None
+        self.completion_provider: Callable | None = None     # -> list of module infos (dedup'd global index)
+        self._comp: dict | None = None
         self.sibling: dict | None = None          # the other file's tab (Tabbed layout)
         self.missing = False
         self._saved_text, self._modified = "", False
@@ -634,7 +642,11 @@ class VerilogCodeEditor(ctk.CTkFrame):
         t.bind("<Button-3>", self._popup)
         t.bind("<FocusIn>", lambda e: self.on_focus and self.on_focus(self))
         t.bind("<F3>", lambda e: (self.find_next(True), "break")[1])
-        t.bind("<Escape>", lambda e: self.hide_find())
+        t.bind("<Escape>", lambda e: "break" if self._close_completions() else self.hide_find())
+        t.bind("<Up>", lambda e: self._comp_move(-1))
+        t.bind("<Down>", lambda e: self._comp_move(1))
+        t.bind("<Button-1>", lambda e: (self._close_completions(), None)[1], add="+")
+        t.bind("<FocusOut>", lambda e: self.after(120, self._close_if_unfocused), add="+")
         self.gutter.bind("<Motion>", self._gutter_motion)
         self.gutter.bind("<Leave>", lambda e: self._tooltip.hide())
         self.gutter.bind("<MouseWheel>", lambda e: self.text.yview_scroll(int(-e.delta / 40), "units"))
@@ -678,6 +690,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
             self.prompt_goto_line()
         elif action == "comment":
             self.toggle_comment()
+        elif action == "complete":
+            self.show_completions()
         elif action == "dup":
             self.duplicate_line()
         elif action in ("zoom_in", "zoom_out", "zoom_reset"):
@@ -708,6 +722,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
         return " " * int(self.cfg["tab_size"]) if self.cfg["insert_spaces_for_tabs"] else "\t"
 
     def _on_tab(self, e) -> str:
+        if self._comp:
+            return self._comp_accept()
         ranges = self.text.tag_ranges("sel")
         if ranges and self.text.index(ranges[0]).split(".")[0] != self.text.index(ranges[1]).split(".")[0]:
             return self._indent_block(1)
@@ -737,6 +753,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
         return "break"
 
     def _on_backspace(self, e):
+        if self._comp:
+            self.after_idle(self._comp_refilter)
         if self.text.tag_ranges("sel") or not self.cfg["insert_spaces_for_tabs"]:
             return None
         before = self.text.get("insert linestart", "insert")
@@ -753,6 +771,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
 
     def _on_keypress(self, e):
         ch = e.char
+        if self._comp:
+            self.after_idle(self._comp_refilter)
         if not self.cfg["auto_close_brackets_and_blocks"] or not ch or e.state & 0x0004:
             return None
         pairs = {"(": ")", "[": "]", "{": "}", '"': '"'}
@@ -776,6 +796,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
         return None
 
     def _on_return(self, e):
+        if self._comp:
+            return self._comp_accept()
         if not self.cfg["auto_indent"]:
             return None
         if self.text.tag_ranges("sel"):
@@ -855,6 +877,136 @@ class VerilogCodeEditor(ctk.CTkFrame):
         val = dlg.get_input()
         if val and val.strip().isdigit():
             self.goto_line(int(val.strip()))
+
+    # ------------------------------------------------------------------ autocomplete (Ctrl+Space)
+    def word_at_cursor(self) -> str:
+        line = self.text.get("insert linestart", "insert lineend")
+        col = int(self.text.index("insert").split(".")[1])
+        for m in re.finditer(r"[A-Za-z_$][\w$]*", line):
+            if m.start() <= col <= m.end():
+                return m.group(0)
+        return ""
+
+    def _prefix(self) -> str:
+        m = re.search(r"[A-Za-z_$][\w$]*$", self.text.get("insert linestart", "insert"))
+        return m.group(0) if m else ""
+
+    def _completion_items(self) -> list[dict]:
+        items: list[dict] = []
+        seen: set[str] = set()
+        try:
+            local = parse_verilog_source(self.get_content())
+        except Exception:
+            local = []
+        for m in local:
+            for port in m["ports"]:
+                if port["name"] not in seen:
+                    seen.add(port["name"])
+                    items.append({"label": port["name"], "kind": port["direction"], "insert": port["name"],
+                                  "detail": f"{port['direction']} {port['range_text']}".strip()})
+            for n in m["declared_nets"]:
+                if n["name"] not in seen and n["kind"] != "parameter":
+                    seen.add(n["name"])
+                    items.append({"label": n["name"], "kind": n["kind"], "insert": n["name"], "detail": n["kind"]})
+        own = {m["module_name"] for m in local}
+        for mod in (self.completion_provider() if self.completion_provider else []):
+            name = mod["module_name"]
+            if name in seen or name in own:
+                continue
+            seen.add(name)
+            ports = mod.get("ports", [])
+            w = max((len(p["name"]) for p in ports), default=0)
+            body = ",\n".join(f"    .{p['name'].ljust(w)} ({CURSOR if i == 0 else ''})" for i, p in enumerate(ports))
+            inst = f"{name} u_{name.lower()} (\n{body}\n);" if ports else f"{name} u_{name.lower()} ();{CURSOR}"
+            items.append({"label": name, "kind": "module", "insert": inst, "snippet": True,
+                          "detail": "module (" + ", ".join(f"{p['direction'][:3]} {p['name']}" for p in ports) + ")"})
+        for wd in COMPLETION_WORDS:
+            if wd not in seen:
+                items.append({"label": wd, "kind": "keyword" if not wd.startswith("$") else "system task", "insert": wd, "detail": ""})
+        return items
+
+    def show_completions(self) -> None:
+        self._close_completions()
+        items = self._completion_items()
+        if not items:
+            return
+        sc = self.cfg.scheme
+        top = tk.Toplevel(self.text)
+        top.wm_overrideredirect(True)
+        top.attributes("-topmost", True)
+        lb = tk.Listbox(top, height=10, width=64, activestyle="none", font=self.font, bd=1, relief="solid",
+                        bg=sc["gutter_bg"], fg=sc["fg"], selectbackground=sc["selection"], selectforeground=sc["fg"],
+                        highlightthickness=0, exportselection=False)
+        lb.pack(fill="both", expand=True)
+        lb.bind("<Double-Button-1>", lambda e: self._comp_accept())
+        self._comp = {"top": top, "lb": lb, "all": items, "shown": []}
+        if not self._comp_refilter():
+            return
+        bbox = self.text.bbox("insert") or (0, 0, 0, 20)
+        x = self.text.winfo_rootx() + bbox[0]
+        y = self.text.winfo_rooty() + bbox[1] + bbox[3] + 2
+        top.wm_geometry(f"+{x}+{y}")
+
+    def _comp_refilter(self) -> bool:
+        c = self._comp
+        if not c:
+            return False
+        pre = self._prefix().lower()
+        shown = [i for i in c["all"] if i["label"].lower().startswith(pre)] if pre else c["all"]
+        shown += [i for i in c["all"] if pre and pre in i["label"].lower() and i not in shown]
+        if not shown:
+            self._close_completions()
+            return False
+        c["shown"] = shown[:200]
+        lb = c["lb"]
+        lb.delete(0, "end")
+        for i in c["shown"]:
+            tag = {"module": "◆", "input": "→", "output": "←", "inout": "↔", "keyword": "·", "system task": "$"}.get(i["kind"], "•")
+            lb.insert("end", f" {tag} {i['label']:<22} {i['detail'][:48]}")
+        lb.selection_set(0)
+        lb.see(0)
+        return True
+
+    def _comp_move(self, d: int):
+        if not self._comp:
+            return None
+        lb = self._comp["lb"]
+        cur = (lb.curselection() or (0,))[0]
+        nxt = max(0, min(lb.size() - 1, cur + d))
+        lb.selection_clear(0, "end")
+        lb.selection_set(nxt)
+        lb.see(nxt)
+        return "break"
+
+    def _comp_accept(self) -> str:
+        c = self._comp
+        if not c:
+            return "break"
+        sel = c["lb"].curselection()
+        item = c["shown"][sel[0] if sel else 0]
+        pre = self._prefix()
+        self._close_completions()
+        if pre:
+            self.text.delete(f"insert-{len(pre)}c", "insert")
+        if item.get("snippet"):
+            self.insert_snippet(item["insert"])
+        else:
+            self.insert_text(item["insert"])
+        return "break"
+
+    def _close_completions(self) -> bool:
+        if self._comp:
+            try:
+                self._comp["top"].destroy()
+            except tk.TclError:
+                pass
+            self._comp = None
+            return True
+        return False
+
+    def _close_if_unfocused(self) -> None:
+        if self._comp and self.focus_get() not in (self.text, self._comp["lb"]):
+            self._close_completions()
 
     # ------------------------------------------------------------------ find / replace
     def show_find(self, replace: bool = False) -> None:
@@ -944,9 +1096,19 @@ class TruthTableGrid(ctk.CTkFrame):
         self.table: dict = {"columns": [], "rows": [], "counts": {}, "outputs": []}
         self.widths: dict[str, int] = {}
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        self.filter_mode, self.filter_text = "All", ""
         bar = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=6)
+        bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 2))
+        fbar = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        fbar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        ctk.CTkLabel(fbar, text="SHOW", text_color=VS["muted"], font=ctk.CTkFont(size=11)).pack(side="left", padx=(2, 6))
+        self.filter_seg = ctk.CTkSegmentedButton(fbar, values=["All", "x/z Floating", "FAIL"], command=self._set_filter, **seg_style())
+        self.filter_seg.set("All")
+        self.filter_seg.pack(side="left")
+        self.search = ctk.CTkEntry(fbar, placeholder_text="🔍 Filter rows (e.g. 1, sum=1, 1010)…", width=260, height=24, **entry_style())
+        self.search.pack(side="left", padx=10)
+        self.search.bind("<KeyRelease>", lambda e: self._set_search(self.search.get()))
         ctk.CTkLabel(bar, text="RADIX", text_color=VS["muted"], font=ctk.CTkFont(size=11)).pack(side="left", padx=(2, 6))
         self.radix = ctk.CTkSegmentedButton(bar, values=list(RADIXES), command=self._radix_changed, **seg_style())
         self.radix.set(config["default_radix"])
@@ -957,11 +1119,11 @@ class TruthTableGrid(ctk.CTkFrame):
         self.summary.pack(side="left", padx=14)
         self.style = ttk.Style(self)
         self.tree = ttk.Treeview(self, show="headings", style="VF.Treeview", selectmode="extended")
-        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.tree.grid(row=2, column=0, sticky="nsew")
         vsb = slim_scrollbar(self, self.tree.yview)
-        vsb.grid(row=1, column=1, sticky="ns")
+        vsb.grid(row=2, column=1, sticky="ns")
         hsb = slim_scrollbar(self, self.tree.xview, "horizontal")
-        hsb.grid(row=2, column=0, sticky="ew")
+        hsb.grid(row=3, column=0, sticky="ew")
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         self.apply_theme(config)
 
@@ -993,7 +1155,25 @@ class TruthTableGrid(ctk.CTkFrame):
         self.render()
         self.summary.configure(text=message)
 
-    def _display_rows(self) -> tuple[list[str], list[list[str]], list[str]]:
+    def _set_filter(self, mode: str) -> None:
+        self.filter_mode = mode
+        self.render()
+
+    def _set_search(self, text: str) -> None:
+        self.filter_text = text.strip().lower()
+        self.render()
+
+    def _keep(self, r: dict, shown_vals: list[str]) -> bool:
+        if self.filter_mode == "FAIL" and r["status"] != "FAIL":
+            return False
+        if self.filter_mode.startswith("x/z") and not r["status"].startswith("FLOATING"):
+            return False
+        if self.filter_text:
+            hay = " ".join(shown_vals + [r.get("line", "")]).lower()
+            return all(tok in hay for tok in self.filter_text.split())
+        return True
+
+    def _display_rows(self, filtered: bool = False) -> tuple[list[str], list[list[str]], list[str]]:
         radix = self.radix.get()
         cols = self.table.get("columns", [])
         outs = set(self.table.get("outputs", []))
@@ -1001,12 +1181,14 @@ class TruthTableGrid(ctk.CTkFrame):
         rows, statuses = [], []
         for k, r in enumerate(self.table.get("rows", []), 1):
             vals = [convert_value(v, radix, self.widths.get(c)) for c, v in zip(cols, r["values"])]
+            if filtered and not self._keep(r, vals):
+                continue
             rows.append([str(k)] + vals + [r["status"]])
             statuses.append(r["status"])
         return heads, rows, statuses
 
     def render(self) -> None:
-        heads, rows, statuses = self._display_rows()
+        heads, rows, statuses = self._display_rows(filtered=True)
         self.tree.delete(*self.tree.get_children())
         ids = [f"c{i}" for i in range(len(heads))]
         self.tree.configure(columns=ids)
@@ -1020,13 +1202,14 @@ class TruthTableGrid(ctk.CTkFrame):
             tag = "tag_fail" if st == "FAIL" else "tag_xz" if st != "OK" else ("tag_ok_alt" if k % 2 else "tag_ok")
             self.tree.insert("", "end", values=r, tags=(tag,))
         c = self.table.get("counts", {})
-        if rows:
-            parts = [f"{len(rows)} rows"]
+        total = len(self.table.get("rows", []))
+        if total:
+            parts = [f"{len(rows)} of {total} rows" if len(rows) != total else f"{total} rows"]
             if c.get("FLOATING/CONFLICT (x/z)"):
                 parts.append(f"⚠ {c['FLOATING/CONFLICT (x/z)']} x/z")
             if c.get("FAIL"):
                 parts.append(f"✖ {c['FAIL']} FAIL")
-            if len(parts) == 1:
+            if not c.get("FLOATING/CONFLICT (x/z)") and not c.get("FAIL"):
                 parts.append("✔ all clean")
             self.summary.configure(text="   ".join(parts))
 
@@ -1476,3 +1659,75 @@ class SideSection(ctk.CTkFrame):
         self.set_count(self._n)
         if self.on_toggle:
             self.on_toggle(self)
+
+
+
+class PinoutDiagram(tk.Canvas):
+    """VS Code-styled IC block: inputs on the left, outputs/inouts on the right, buses drawn as double lines."""
+
+    def __init__(self, master, config, **kw):
+        super().__init__(master, highlightthickness=0, bd=0, **kw)
+        self.cfg, self.info, self.gates = config, None, 0
+        self.bind("<Configure>", lambda e: self.render())
+
+    def set_module(self, info: dict | None, gate_total: int = 0, depth: int = 0) -> None:
+        self.info, self.gates, self.depth = info, gate_total, depth
+        self.render()
+
+    def render(self) -> None:
+        self.delete("all")
+        dark = is_dark(self.cfg)
+        th = VSCODE_THEMES["Dark" if dark else "Light"]
+        bg, body, border, fg, muted = th["editor"], th["group"], "#007ACC", th["text"], th["muted"]
+        wire, bus = ("#4EC9B0", "#DCDCAA") if dark else ("#16825D", "#795E26")
+        self.configure(bg=bg)
+        w, h = max(self.winfo_width(), 200), max(self.winfo_height(), 160)
+        sc = ui_scale(self)
+        f = (self.cfg["editor_font_family"], -max(9, round(12 * sc)))
+        fb = ("Segoe UI", -max(10, round(14 * sc)), "bold")
+        if not self.info:
+            self.create_text(w / 2, h / 2, text="Open a module to see its pinout", fill=muted, font=f)
+            return
+        ins = [p for p in self.info["ports"] if p["direction"] == "input"]
+        outs = [p for p in self.info["ports"] if p["direction"] != "input"]
+        rows = max(len(ins), len(outs), 1)
+        head = 46 * sc                                   # header band: module name + gate count, never under a pin
+        pitch = max(18 * sc, min(32 * sc, (h - head - 40 * sc) / rows))
+        chip_h = head + rows * pitch + 12 * sc
+        lead = max(36 * sc, min(70 * sc, w * 0.16))
+        chip_w = max(130 * sc, min(260 * sc, w - 2 * lead - 120 * sc))      # leave room for the in/out labels
+        x0, y0 = (w - chip_w) / 2, max(10 * sc, (h - chip_h) / 2)
+        x1, y1 = x0 + chip_w, y0 + chip_h
+        self.create_rectangle(x0, y0, x1, y1, fill=body, outline=border, width=max(2, int(2 * sc)))
+        self.create_arc(x0 + chip_w / 2 - 10 * sc, y0 - 10 * sc, x0 + chip_w / 2 + 10 * sc, y0 + 10 * sc,
+                        start=180, extent=180, style="arc", outline=border, width=max(2, int(2 * sc)))
+        self.create_text((x0 + x1) / 2, y0 + 20 * sc, text=self.info["module_name"], fill=fg, font=fb)
+        self.create_text((x0 + x1) / 2, y0 + 37 * sc, fill=muted, font=f, text=f"{self.gates} gates · depth ~{self.depth}")
+        self.create_line(x0 + 8 * sc, y0 + head, x1 - 8 * sc, y0 + head, fill=th["border"])
+        pin_y = lambda k, n: y0 + head + (k + 0.5) * (chip_h - head - 12 * sc) / max(n, 1)
+
+        def pin(p, y, left: bool) -> None:
+            is_bus = isinstance(p.get("bits"), int) and p["bits"] > 1 or bool(p.get("range_text") and p.get("bits") is None)
+            xa, xb = (x0 - lead, x0) if left else (x1, x1 + lead)
+            color = bus if is_bus else wire
+            if is_bus:
+                gap = 2.5 * sc
+                self.create_line(xa, y - gap, xb, y - gap, fill=color, width=max(1, int(1.5 * sc)))
+                self.create_line(xa, y + gap, xb, y + gap, fill=color, width=max(1, int(1.5 * sc)))
+                mid = (xa + xb) / 2
+                self.create_line(mid - 5 * sc, y + 7 * sc, mid + 5 * sc, y - 7 * sc, fill=color, width=max(1, int(1.5 * sc)))
+                self.create_text(mid, y - 9 * sc, text=p["range_text"] or f"[{p['bits'] - 1}:0]", fill=color, font=f, anchor="s")
+            else:
+                self.create_line(xa, y, xb, y, fill=color, width=max(1, int(2 * sc)))
+            arrow_x = xb if left else xb + 2 * sc     # inputs point into the chip, outputs point away from it
+            d = 6 * sc
+            if p["direction"] != "inout":
+                self.create_polygon(arrow_x - d, y - 5 * sc, arrow_x, y, arrow_x - d, y + 5 * sc, fill=color, outline="")
+            self.create_text(x0 + 10 * sc if left else x1 - 10 * sc, y, text=p["name"], fill=fg, font=f,
+                             anchor="w" if left else "e")
+            self.create_text(xa - 4 * sc if left else xb + 4 * sc, y, anchor="e" if left else "w", fill=muted, font=f,
+                             text="in" if left else ("inout" if p["direction"] == "inout" else "out"))
+        for k, p in enumerate(ins):
+            pin(p, pin_y(k, len(ins)), True)
+        for k, p in enumerate(outs):
+            pin(p, pin_y(k, len(outs)), False)

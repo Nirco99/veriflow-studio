@@ -478,25 +478,27 @@ def build_global_module_index(library_dirs: list, work_dir: Path | str | None = 
                               cache: dict | None = None, exclude_files: list | None = None) -> dict[str, dict]:
     """Index every module of the workspace and all package folders: name -> entry.
 
-    `library_dirs` items: Path | (Path, package_name) | {"path", "name", "recursive"}.
+    `library_dirs` items: Path | (Path, package_name) | {"path", "name", "recursive", "exclude_modules"}.
+    Modules listed in a package's `exclude_modules` (duplicates skipped at import) are never indexed for it.
     Precedence (first definition wins): workspace, then packages in the given order.
     Entry = module info + filepath, package_name, file_modules, needs_l_flag (file stem != module name,
     several modules in the file, a non-.v file, or a file in a sub-folder that `-y` cannot see).
     """
-    sources: list[tuple[Path, str, bool]] = []
+    sources: list[tuple[Path, str, bool, frozenset]] = []
     if work_dir:
-        sources.append((Path(work_dir), "Workspace", False))
+        sources.append((Path(work_dir), "Workspace", False, frozenset()))
     for item in library_dirs:
         if isinstance(item, dict):
-            sources.append((Path(item["path"]), item.get("name") or Path(item["path"]).name, bool(item.get("recursive"))))
+            sources.append((Path(item["path"]), item.get("name") or Path(item["path"]).name, bool(item.get("recursive")),
+                            frozenset(item.get("exclude_modules") or ())))
         elif isinstance(item, (tuple, list)):
-            sources.append((Path(item[0]), item[1], bool(item[2]) if len(item) > 2 else False))
+            sources.append((Path(item[0]), item[1], bool(item[2]) if len(item) > 2 else False, frozenset()))
         else:
-            sources.append((Path(item), Path(item).name, False))
+            sources.append((Path(item), Path(item).name, False, frozenset()))
     skip = {os.path.normcase(os.path.abspath(f)) for f in (exclude_files or [])}
     index: dict[str, dict] = {}
     seen_dirs: set[str] = set()
-    for root, pkg_name, recursive in sources:
+    for root, pkg_name, recursive, excluded in sources:
         key = os.path.normcase(os.path.abspath(root))
         if key in seen_dirs or not root.is_dir():
             continue
@@ -516,7 +518,10 @@ def build_global_module_index(library_dirs: list, work_dir: Path | str | None = 
                 if cache is not None:
                     cache[fkey] = ((st.st_mtime, st.st_size), mods)
             names = [m["module_name"] for m in mods]
+            rel = f.relative_to(root).as_posix() if excluded else ""
             for m in mods:
+                if excluded and (f"{rel}|{m['module_name']}" in excluded or m["module_name"] in excluded):
+                    continue                      # duplicate skipped at import ("<file>|<module>" or a bare name)
                 entry = {**m, "filepath": f, "package_name": pkg_name, "package_root": root, "file_modules": names,
                          "needs_l_flag": (f.stem != m["module_name"] or len(mods) > 1 or f.suffix.lower() != ".v"
                                           or os.path.normcase(str(f.parent)) != os.path.normcase(str(root)))}
@@ -528,7 +533,7 @@ def build_global_module_index(library_dirs: list, work_dir: Path | str | None = 
 
 
 def resolve_required_library_files(root_files: list, known_modules: dict[str, dict],
-                                   shadowed: dict | None = None) -> tuple[list[str], list[str], list[str]]:
+                                   shadowed: dict | None = None, needed: list | None = None) -> tuple[list[str], list[str], list[str]]:
     """Trace instantiations from the explicit sources and work out what iverilog needs.
 
     Returns (y_dirs, l_files, missing_modules):
@@ -561,6 +566,8 @@ def resolve_required_library_files(root_files: list, known_modules: dict[str, di
         if entry is None:
             missing.append(name)
             continue
+        if needed is not None:
+            needed.append(name)            # every module resolved from outside the explicit sources
         target = str(entry["filepath"]) if entry["needs_l_flag"] else str(entry["filepath"].parent)
         bucket = l_files if entry["needs_l_flag"] else y_dirs
         if all(os.path.normcase(target) != os.path.normcase(t) for t in bucket):
@@ -584,6 +591,119 @@ def strip_modules_from_source(text: str, names: set[str] | list[str]) -> str:
     for start, end in sorted(spans, reverse=True):
         text = text[:start] + _blank_span(text[start:end]) + text[end:]
     return text
+
+
+_DIRECTIVE_LINE = re.compile(r"^[ \t]*`(timescale|define|undef|include|default_nettype|resetall)\b[^\n]*", re.M)
+
+
+def extract_module_source(text: str, name: str) -> str | None:
+    """Source of one module plus the compiler directives (`timescale, `define, `include...) that precede it -
+    a self-contained single-module "cell" that `-y` can find by name."""
+    mod = next((m for m in parse_verilog_source(text) if m["module_name"] == name), None)
+    if mod is None:
+        return None
+    start, end = mod["span"]
+    code = strip_comments(text)
+    head = [d.group(0).strip() for d in _DIRECTIVE_LINE.finditer(code, 0, start)]
+    return ("\n".join(head) + "\n\n" if head else "") + text[start:end].rstrip() + "\n"
+
+
+_PRIM_COUNTED = ("nand", "nor", "xor", "xnor", "and", "or", "not", "buf")
+
+
+def _terms(expr: str) -> list[str]:
+    return [t for t in _IDENT_FREE.findall(expr or "") if t not in KEYWORDS]
+
+
+def _instance_io(inst: dict, known: dict) -> tuple[list[str], list[str]]:
+    """(driven nets, read nets) of one instance - nets reduced to identifiers (buses as a whole)."""
+    if inst["is_primitive"]:
+        terms = inst["positional"]
+        n_out = len(terms) - 1 if inst["type"] in ("not", "buf") else 1
+        return ([t for e in terms[:n_out] for t in _terms(e)], [t for e in terms[n_out:] for t in _terms(e)])
+    sub = known.get(inst["type"])
+    if sub is None:
+        return [], [t for e in (inst["positional"] or inst["connections"].values()) for t in _terms(e or "")]
+    pairs = (list(zip(sub["ports"], inst["positional"])) if not inst["named"] else
+             [(p, inst["connections"][p["name"]]) for p in sub["ports"] if inst["connections"].get(p["name"])])
+    outs = [t for p, e in pairs if p["direction"] != "input" for t in _terms(e)]
+    ins = [t for p, e in pairs if p["direction"] == "input" for t in _terms(e)]
+    return outs, ins
+
+
+def module_logic_depth(name: str, known: dict, _memo: dict | None = None, _stack: set | None = None) -> int:
+    """Estimated combinational depth in gate levels (inputs -> outputs, sub-modules expanded recursively)."""
+    memo = {} if _memo is None else _memo
+    stack = set() if _stack is None else _stack
+    if name in memo:
+        return memo[name]
+    info = known.get(name)
+    if info is None or name in stack:
+        return 0
+    stack.add(name)
+    drivers = []
+    for inst in info.get("instantiations", []):
+        if inst["is_primitive"]:
+            d = 1
+        else:
+            d = max(1, module_logic_depth(inst["type"], known, memo, stack)) if inst["type"] in known else 1
+        outs, ins = _instance_io(inst, known)
+        ins = [i for i in ins if i not in outs]      # bus treated as one net: c[i] <- c[i-1] is not a real loop
+        drivers.append((outs, ins, d))
+    depth = {p["name"]: 0 for p in info["ports"] if p["direction"] == "input"}
+    for _ in range(len(drivers) + 2):          # relaxation; bounded so feedback loops cannot spin forever
+        changed = False
+        for outs, ins, d in drivers:
+            v = d + max((depth.get(i, 0) for i in ins), default=0)
+            for o in outs:
+                if depth.get(o, -1) < v:
+                    depth[o], changed = v, True
+        if not changed:
+            break
+    stack.discard(name)
+    memo[name] = max((depth.get(p["name"], 0) for p in info["ports"] if p["direction"] != "input"), default=0)
+    return memo[name]
+
+
+def analyze_hierarchy(root: str, known: dict, max_nodes: int = 4000) -> dict:
+    """Instance tree + flattened primitive gate counts + estimated logic depth for module `root`.
+
+    Counts are static: an instance array or a generate loop body is counted once."""
+    gates = {g: 0 for g in _PRIM_COUNTED}
+    other_prims: dict[str, int] = {}
+    totals = {"instances": 0, "nodes": 0}
+    missing: set[str] = set()
+
+    def build(inst_name: str, type_name: str, path: tuple, file=None, line=0) -> dict:
+        info = known.get(type_name)
+        node = {"name": inst_name, "type": type_name, "file": str(info["filepath"]) if info and info.get("filepath") else file,
+                "line": info.get("line", 0) if info else line, "children": [], "primitive": False,
+                "missing": info is None, "package": info.get("package_name") if info else None}
+        if info is None:
+            missing.add(type_name)
+            return node
+        if type_name in path or totals["nodes"] > max_nodes:
+            node["recursive"] = True
+            return node
+        for inst in info.get("instantiations", []):
+            totals["nodes"] += 1
+            src = str(info["filepath"]) if info.get("filepath") else None
+            if inst["is_primitive"]:
+                if inst["type"] in gates:
+                    gates[inst["type"]] += 1
+                else:
+                    other_prims[inst["type"]] = other_prims.get(inst["type"], 0) + 1
+                node["children"].append({"name": inst["name"] or "", "type": inst["type"], "file": src, "line": inst["line"],
+                                         "children": [], "primitive": True, "missing": False, "package": None})
+            else:
+                totals["instances"] += 1
+                child = build(inst["name"] or "?", inst["type"], path + (type_name,), src, inst["line"])
+                child["inst_file"], child["inst_line"] = src, inst["line"]
+                node["children"].append(child)
+        return node
+    tree = build(root, root, ())
+    return {"tree": tree, "gates": gates, "other_primitives": other_prims, "total_gates": sum(gates.values()) + sum(other_prims.values()),
+            "instances": totals["instances"], "depth": module_logic_depth(root, known), "missing": sorted(missing)}
 
 
 def instantiation_template(info: dict, instance_name: str = "u0") -> str:
@@ -781,10 +901,14 @@ def _lit(bits: int, value: int) -> str:
 
 
 def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, step: int | None = None,
-                                empty_stimulus: bool = False) -> str:
+                                empty_stimulus: bool = False, checks: dict[str, str] | None = None) -> str:
     """Build a complete <Module>_tb.v for the given parsed module.
 
-    empty_stimulus=True gives a skeleton: declarations, DUT wiring, dump/monitor and an empty stimulus section."""
+    empty_stimulus=True gives a skeleton: declarations, DUT wiring, dump/monitor and an empty stimulus section.
+    checks={"sum": "a ^ b ^ cin", ...} makes it self-checking: after every vector each listed output is compared
+    with its expected expression and a PASS / FAIL line is printed (FAIL rows show up red in the truth table)."""
+    checks = {k: v.strip().rstrip(";").split("=", 1)[-1].strip() if v.strip().startswith(k) and "=" in v and "==" not in v
+              else v.strip().rstrip(";") for k, v in (checks or {}).items() if v and v.strip()}
     name = module_info["module_name"]
     tb = f"{name}_tb"
     ports = module_info.get("ports", [])
@@ -799,6 +923,9 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
     clocks = [p for p in ports if p["direction"] == "input" and p["name"].lower() in ("clk", "clock") and bits(p) == 1]
     ins = [p for p in ports if p["direction"] == "input" and p not in clocks]
     outs = [p for p in ports if p["direction"] in ("output", "inout")]
+    checked = [p for p in outs if p["name"] in checks]
+    if checked:
+        empty_stimulus = False                 # self-checking needs real stimulus vectors
     if step is None:
         insts = module_info.get("instantiations", [])
         step = 10 if all(i["is_primitive"] and not i["params"] for i in insts) else 100
@@ -817,6 +944,10 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
         L.append(f"    wire {decl_range(p)}{p['name']};")
     if 0 < total <= 7 and not empty_stimulus:
         L.append("    integer i;")
+    if checked:
+        L.append("    integer errors;")
+        for p in checked:
+            L.append(f"    reg  {decl_range(p)}exp_{p['name']};      // expected: {checks[p['name']]}")
     L.append("")
     if ports:
         w = max(len(p["name"]) for p in ports)
@@ -836,21 +967,38 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
     fmt = " | ".join(f"{p['name']}=%b" for p in shown)
     sample = f'$display("{fmt}", {", ".join(p["name"] for p in shown)});' if shown else ""
     settle = step != 10 and bool(shown) and not empty_stimulus   # gate delays: $monitor would also print transient glitches
-    if shown and not settle:
+    if checked:
+        L += ["        errors = 0;", "        // self-checking: every vector prints PASS or FAIL (FAIL rows turn red in the truth table)"]
+    elif shown and not settle:
         L.append(f'        $monitor("{fmt}", {", ".join(p["name"] for p in shown)});')
     elif settle:
         L.append("        // outputs are sampled with $display after each step (settled values only, no glitches)")
     L.append("")
-    after = f" {sample}" if settle else ""
+    after = f" {sample}" if settle and not checked else ""
+    vec_args = ", ".join(p["name"] for p in shown)
+
+    def check_block(indent: str) -> list[str]:
+        if not checked:
+            return []
+        cond = " || ".join(f"({p['name']} !== exp_{p['name']})" for p in checked)
+        exp_txt = ", ".join(f"{p['name']} %b" for p in checked)
+        exp_args = ", ".join(f"exp_{p['name']}" for p in checked)
+        return ([f"{indent}exp_{p['name']} = {checks[p['name']]};" for p in checked] +
+                [f"{indent}if ({cond}) begin",
+                 f'{indent}    $display("FAIL: {fmt}   <- expected {exp_txt}", {vec_args}, {exp_args});',
+                 f"{indent}    errors = errors + 1;",
+                 f"{indent}end else",
+                 f'{indent}    $display("PASS: {fmt}", {vec_args});'])
     if empty_stimulus:
         example = " ".join(f"{p['name']} = {_lit(bits(p), 0)};" for p in ins[:3]) or "// (no inputs)"
         L += ["        // ---- apply your stimulus here, for example:", f"        // {example} #{step};", ""]
     elif total == 0:
         L.append(f"        #{step};{after}")
+        L += check_block("        ")
     elif total <= 7:
         concat = "{" + ", ".join(p["name"] for p in ins) + "}"
         L += [f"        for (i = 0; i < (1 << {total}); i = i + 1) begin",
-              f"            {concat} = i;", f"            #{step};{after}", "        end"]
+              f"            {concat} = i;", f"            #{step};{after}"] + check_block("            ") + ["        end"]
     else:
         seed = 0x2545F491
         vectors = []
@@ -871,6 +1019,10 @@ def generate_testbench_skeleton(module_info: dict, include_vcd: bool = True, ste
         for lab, row in zip(labels, vectors):
             L.append(f"        // {lab}")
             L.append("        " + " ".join(row) + f" #{step};{after}")
+            L += check_block("        ")
+    if checked:
+        L += ['        if (errors == 0) $display("SELF-CHECK: all vectors PASSED");',
+              '        else             $display("SELF-CHECK: %0d vector(s) FAILED", errors);']
     L += [f"        #{step} $finish;", "    end", "", "endmodule", ""]
     return "\n".join(L)
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 APP_NAME = "VeriFlow Studio"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 IS_WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -259,8 +259,9 @@ class ConfigManager:
             if kind == "builtin" and any(p["kind"] == "builtin" for p in out):
                 continue
             seen.add(str(item["name"]))
+            excluded = sorted({str(x) for x in item.get("excluded_modules") or [] if isinstance(x, str) and x})
             out.append({"name": str(item["name"]), "path": str(item["path"]), "enabled": bool(item.get("enabled", True)),
-                        "builtin": kind == "builtin", "kind": kind})
+                        "builtin": kind == "builtin", "kind": kind, "excluded_modules": excluded})
         if not any(p["kind"] == "builtin" for p in out):
             out.insert(0, copy.deepcopy(DEFAULT_CONFIG["library_packages"][0]))
         return out
@@ -353,9 +354,10 @@ class ConfigManager:
         return st["iverilog"] and st["vvp"]
 
     def get_all_enabled_library_dirs(self) -> list[Path]:
-        """Every enabled package folder that exists (the built-in entry always follows `lib_dir`)."""
+        """Every enabled package folder that exists, in -y priority order: imported/linked packages first,
+        the built-in course library last (the workspace itself is added before all of these by the runner)."""
         out = []
-        for p in self.data["library_packages"]:
+        for p in sorted(self.data["library_packages"], key=lambda q: q["kind"] == "builtin"):
             path = Path(self.data["lib_dir"]) if p["kind"] == "builtin" else Path(p["path"])
             if p["enabled"] and path.is_dir() and all(os.path.normcase(str(path)) != os.path.normcase(str(o)) for o in out):
                 out.append(path)

@@ -145,22 +145,33 @@ The vault lives at `%USERPROFILE%\.veriflow_studio\packages\<package>` (setting 
 
 **How compiling finds them – from any folder:**
 
-1. **`-y` for every enabled package folder** – the workspace comes first (so your own modules always win), then the
-   course library `C:\iverilog\compstruct\lib`, then the vault and linked packages.
+1. **`-y` in a strict 3-tier priority order** – **Tier 1** the workspace folder (a student's own `<Module>.v` always
+   wins), **Tier 2** enabled imported / linked packages, **Tier 3** the course library `C:\iverilog\compstruct\lib`.
+   The module index uses exactly the same order, so the linter, the hierarchy view and the compiler always agree.
 2. **`-l` for files `-y` cannot see.** VeriFlow indexes every module in every package (all modules of multi-module
    files included) and traces your design's instantiations **recursively** (`Top` → `Mux4` → `Mux2`…). Any needed module
    that lives in a multi-module file, a file whose name differs from the module, a `.sv` file, or a sub-folder is loaded
    with **`-l <file>`** – iverilog's *library file* mode, so only the modules you actually use are elaborated and the rest
    never become stray top-level modules. The flags are placed before the source files, as iverilog requires.
-3. **No "already declared" clashes.** If a package file also defines a module that you defined yourself (for example
-   your own `Inv.v`), VeriFlow passes a cached copy of that file with just that module blanked out – your version wins.
+3. **Zero "already declared" clashes (`_cells`).** iverilog is never given two files that define the same module. If
+   a multi-module file holds a module you need (`ModA`) *and* a module that a higher-priority definition shadows
+   (`ModB`), VeriFlow extracts `ModA` – with its `` `timescale``/`` `define`` lines – into a single-module cell
+   `<vault>\_cells\<workspace>\ModA.v` and resolves it through `-y`. The same happens for any package folder that still
+   physically contains a skipped duplicate, so iverilog's own `-y` search can never pick the wrong copy.
 
-**Duplicate modules are blocked at load time.** VeriFlow keeps one global map *module name → absolute file path* over every
-registered package (the course library included). Loading a file that defines a module already in that map – or two files
-in the same selection/zip/folder that define the same module – is **blocked**: the file is not copied, a warning toast
-names the module, and the Console shows where it is already defined. A linked folder is all-or-nothing (refused if it
-contains a duplicate). Re-importing the *same* file into its own package is allowed (it simply updates it). This keeps
-iverilog's `Module X was already declared` error from ever coming from your packages.
+**Smart partial deduplication at load time.** VeriFlow keeps one map *module name → absolute file path* over the
+**enabled** packages. When you load `.v` files, a `.zip` or a folder (copied or linked), every **new** module is loaded
+and every module that an enabled package already provides is **skipped** – never the whole folder. A file is only left
+out when *all* of its modules are duplicates; a mixed file is kept and just its duplicate is masked (recorded per file
+in the package's `excluded_modules`). You get one clear note, e.g.
+*"Loaded 10 new module(s) from Lab4_Modules (skipped 1 duplicate – already provided by compstruct\lib: HalfAdder)"*,
+and the Console lists where each skipped module already lives. Re-importing the *same* file into its own package simply
+updates it.
+
+**Disabled packages never block anything.** Only enabled packages count as "already provided", so you can disable an
+old package and import an updated copy of the same modules. Re-enabling a package is checked first: if one of its
+modules is now provided by another enabled package, VeriFlow tells you which module clashes with which package and
+offers to disable the other package instead – otherwise the package stays disabled.
 
 **`.vh` / `.svh` headers** are imported together with the modules (from files, folders and zips). They are never treated
 as modules; instead every package folder that contains headers – plus the workspace – is passed with `-I`, so
@@ -215,6 +226,10 @@ parameterised headers like `module Mux #(parameter W=16)`, multi-bit buses `[msb
   or **Generate Skeleton Testbench (empty initial)**. The skeleton has the same declarations, `uut` wiring,
   `$dumpfile`/`$dumpvars` and `$monitor`, but an empty stimulus section for you to fill in. The Explorer menu also offers
   *Open*, *Open in Notepad++* and *Reveal in Explorer*.
+* **Self-checking testbench** (right-click → *Generate Self-Checking Testbench…*): type the expected expression for each
+  output (e.g. `sum = a ^ b ^ cin`, `cout = (a & b) | (cin & (a ^ b))`). After every vector the testbench compares
+  (`!==`) and prints `PASS: …` or `FAIL: … <- expected …`, plus a final `SELF-CHECK` summary – FAIL rows turn red in the
+  truth table.
 
 #### 🔎 Pre-compile course linter & diagnostics
 
@@ -252,6 +267,8 @@ file at that line (the editor for the current module, Notepad++ for any other fi
   `ERROR` or `MISMATCH` are tagged **FAIL** (red).
 * Switch the radix live: **Binary / Hex / Unsigned Dec / Signed Dec** (two's complement uses each port's real width).
 * `📋 Copy Markdown` / `📋 Copy CSV` – paste the table straight into a homework report.
+* **Filter bar** – show `All`, only `x/z Floating` or only `FAIL` rows, plus a text search (`1010`, `sum=1`…), so
+  64- or 128-row tables stay easy to inspect (the summary shows "k of n rows").
 
 #### 〰 Built-in waveform viewer & GTKWave integration
 
@@ -262,6 +279,34 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 * Shows testbench-level signals by default; tick **Internal signals** to include signals inside `uut`.
 * No `.vcd`? The waveform is synthesized from the truth-table rows instead.
 * `📈 Open in GTKWave` opens the same dump in GTKWave.
+
+#### 🌳 Hierarchy & gate-count analyzer + IC pinout (`HIERARCHY & GATES` tab)
+
+* An **instance tree** of the active module across the workspace and all enabled packages – e.g.
+  `FA → ha1 : HalfAdder → g1 : xor, g2 : and`. Each row shows where the module is defined (file + package);
+  clicking an instance opens its `.v` file (read-only preview for package files).
+* A **flattened gate count** over the whole hierarchy (`NAND`, `NOR`, `XOR`, `XNOR`, `AND`, `OR`, `NOT`, `BUF`), the number
+  of sub-module instances, missing modules, and an **estimated logic depth** in gate levels (static analysis: generate
+  loops and instance arrays are counted once).
+* A VS Code-styled **IC block diagram**: inputs on the left, outputs/inouts on the right, buses drawn as double lines with
+  their `[msb:lsb]` range, and the module name with its gate count and depth on the chip.
+
+#### ⌨ Autocomplete (`Ctrl+Space`) & port hints
+
+* `Ctrl+Space` opens a completion list with every module of the workspace and enabled packages (inserts a full
+  named-port instantiation `HalfAdder u_halfadder ( .s (), .c (), … );` with the cursor in the first port), the
+  ports/wires/regs declared in the current file (no more typos that create implicit wires), and Verilog keywords and
+  system tasks (`$display`, `$monitor`, `$finish`, `$dumpvars`…). Arrow keys + `Enter`/`Tab` accept, `Esc` closes.
+* With the cursor on a module name, the status bar shows its port signature and package, e.g.
+  `◆ HalfAdder (output s, output c, input a, input b) · Lab4`.
+
+#### 📦 One-click homework submission (`📦 Export HW .zip`)
+
+* The Explorer's `📦 Export HW .zip` (or `📤`) bundles every `.v` / `_tb.v` / `.vh` of the workspace into
+  `<Workspace>_Submission.zip` and leaves out compiled `vvp` images, `.vcd` dumps, zips and temp/backup files.
+* It checks whether your design instantiates helper modules that are **neither in the course library nor in the folder**
+  (modules from your imported/linked packages) and offers to include them – one self-contained `<Module>.v` each, plus any
+  `` `include``d header – so the grader can compile the zip with the normal course command.
 
 #### 🧹 Homework submission cleaner
 
@@ -393,6 +438,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | `Ctrl+,` | Settings |
 | `Ctrl+F` / `Ctrl+H` | Find / Find & Replace bar (`Enter`, `Shift+Enter`, `F3` = next/previous) |
 | `Ctrl+G` | Go to line |
+| `Ctrl+Space` | Autocomplete: modules (full instantiation), local signals, keywords, system tasks |
 | `Ctrl+/` | Toggle `//` comment on the selected lines |
 | `Ctrl+D` | Duplicate line / selection |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | Undo / redo |
@@ -579,21 +625,30 @@ Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגל
 
 **איך הקומפילציה מוצאת אותם – מכל תיקייה:**
 
-1. **`-y` לכל תיקיית חבילה פעילה** – קודם תיקיית העבודה (כך שהמודולים שלכם תמיד גוברים), אחר כך ספריית הקורס
-   `C:\iverilog\compstruct\lib`, ואחריהן חבילות הכספת והתיקיות המקושרות.
+1. **`-y` בסדר עדיפויות קבוע של 3 שכבות** – **שכבה 1** תיקיית העבודה (קובץ `<Module>.v` של הסטודנט תמיד גובר),
+   **שכבה 2** חבילות שיובאו / קושרו ופעילות, **שכבה 3** ספריית הקורס `C:\iverilog\compstruct\lib`. אינדקס המודולים
+   משתמש בדיוק באותו סדר, כך שה-Linter, תצוגת ההיררכיה והקומפיילר תמיד מסכימים.
 2. **`-l` לקבצים ש-`-y` לא רואה.** VeriFlow מאנדקס כל מודול בכל חבילה (כולל כל המודולים שבקבצים מרובי-מודולים) ועוקב
    **ברקורסיה** אחרי המופעים בתכנון שלכם (`Top` ← `Mux4` ← `Mux2`…). כל מודול נדרש שנמצא בקובץ מרובה מודולים, בקובץ
    ששמו שונה משם המודול, בקובץ `.sv` או בתת-תיקייה, נטען עם **`-l <file>`** – מצב *קובץ ספרייה* של iverilog, כך שרק
    המודולים שבאמת בשימוש עוברים אלבורציה והשאר לעולם לא הופכים למודולי-על מיותרים. הדגלים ממוקמים לפני קבצי המקור,
    כפי ש-iverilog דורש.
-3. **בלי התנגשויות "already declared".** אם קובץ חבילה מגדיר גם מודול שהגדרתם בעצמכם (למשל `Inv.v` משלכם), VeriFlow
-   מעביר עותק שמור של הקובץ שבו רק המודול הזה מושמט – הגרסה שלכם גוברת.
+3. **אפס התנגשויות "already declared" (`_cells`).** iverilog אף פעם לא מקבל שני קבצים שמגדירים את אותו מודול. אם
+   קובץ מרובה-מודולים מכיל מודול שאתם צריכים (`ModA`) *וגם* מודול שהגדרה בעדיפות גבוהה יותר מסתירה (`ModB`), VeriFlow
+   מחלץ את `ModA` – יחד עם שורות ה-`` `timescale``/`` `define`` – לתא של מודול יחיד `<vault>\_cells\<workspace>\ModA.v`
+   ומאתר אותו דרך `-y`. אותו דבר קורה לכל תיקיית חבילה שעדיין מכילה פיזית כפילות שדולגה, כך שחיפוש ה-`-y` של
+   iverilog לעולם לא יבחר בעותק הלא נכון.
 
-**מודולים כפולים נחסמים כבר בטעינה.** VeriFlow מחזיק מפה גלובלית אחת *שם מודול ← נתיב מלא לקובץ* על כל החבילות
-הרשומות (כולל ספריית הקורס). טעינת קובץ שמגדיר מודול שכבר נמצא במפה – או שני קבצים באותה בחירה/zip/תיקייה שמגדירים
-את אותו מודול – **נחסמת**: הקובץ לא מועתק, הודעת אזהרה קופצת עם שם המודול, והקונסולה מציגה איפה הוא כבר מוגדר. תיקייה
-מקושרת היא "הכל או כלום" (נדחית אם יש בה כפילות). ייבוא מחדש של *אותו* קובץ לחבילה שלו מותר (פשוט מעדכן אותו). כך
-השגיאה `Module X was already declared` של iverilog לעולם לא נגרמת מהחבילות שלכם.
+**סינון כפילויות חכם וחלקי בטעינה.** VeriFlow מחזיק מפה אחת *שם מודול ← נתיב מלא לקובץ* על החבילות **הפעילות**.
+כשטוענים קבצי `.v`, קובץ `.zip` או תיקייה (מועתקת או מקושרת), כל מודול **חדש** נטען וכל מודול שחבילה פעילה כבר מספקת
+**מדולג** – אף פעם לא כל התיקייה. קובץ נשאר בחוץ רק כש*כל* המודולים שבו כפולים; קובץ מעורב נשמר ורק הכפילות שבו
+מוסתרת (נרשם לכל קובץ ב-`excluded_modules` של החבילה). מקבלים הודעה אחת ברורה, למשל
+*"Loaded 10 new module(s) from Lab4_Modules (skipped 1 duplicate – already provided by compstruct\lib: HalfAdder)"*,
+והקונסולה מציגה איפה כל מודול שדולג כבר נמצא. ייבוא מחדש של *אותו* קובץ לחבילה שלו פשוט מעדכן אותו.
+
+**חבילות מכובות לא חוסמות שום דבר.** רק חבילות פעילות נחשבות "כבר מסופקות", כך שאפשר לכבות חבילה ישנה ולייבא עותק
+מעודכן של אותם מודולים. הפעלה מחדש של חבילה נבדקת קודם: אם אחד המודולים שלה מסופק עכשיו על ידי חבילה פעילה אחרת,
+VeriFlow מראה איזה מודול מתנגש עם איזו חבילה ומציע לכבות את החבילה האחרת במקום – אחרת החבילה נשארת כבויה.
 
 **קובצי כותרת `.vh` / `.svh`** מיובאים יחד עם המודולים (מקבצים, מתיקיות ומ-zip). הם אף פעם לא נחשבים מודולים; במקום
 זה כל תיקיית חבילה שיש בה כותרות – וגם תיקיית העבודה – מועברת עם `-I`, כך ש-`` `include "defs.vh" `` עובד מכל תיקייה.
@@ -646,6 +701,9 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 * **קליק ימני על מודול** בסייר (או קליק ימני בתוך עורך התכן) ← **Generate Testbench (exhaustive)** או
   **Generate Skeleton Testbench (empty initial)**. השלד כולל את אותן הצהרות, חיווט `uut`, `$dumpfile`/`$dumpvars`
   ו-`$monitor`, אבל עם אזור גירוי ריק שתמלאו בעצמכם. בתפריט של הסייר יש גם *Open*, *Open in Notepad++* ו-*Reveal in Explorer*.
+* **טסטבנץ' שבודק את עצמו** (קליק ימני ← *Generate Self-Checking Testbench…*): מקלידים את הביטוי הצפוי לכל יציאה
+  (למשל `sum = a ^ b ^ cin`, `cout = (a & b) | (cin & (a ^ b))`). אחרי כל וקטור הטסטבנץ' משווה (`!==`) ומדפיס
+  `PASS: …` או `FAIL: … <- expected …`, ובסוף סיכום `SELF-CHECK` – שורות FAIL נצבעות באדום בטבלת האמת.
 
 #### 🔎 Linter של הקורס לפני קומפילציה ואבחון שגיאות
 
@@ -682,6 +740,8 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
   `MISMATCH` מסומנות **FAIL** (אדום).
 * החלפת בסיס בזמן אמת: **Binary / Hex / Unsigned Dec / Signed Dec** (המשלים ל-2 לפי הרוחב האמיתי של כל פורט).
 * `📋 Copy Markdown` / `📋 Copy CSV` – מדביקים את הטבלה ישירות לדוח של תרגיל הבית.
+* **סרגל סינון** – הצגת `All`, רק שורות `x/z Floating` או רק `FAIL`, וגם חיפוש טקסט (`1010`, `sum=1`…), כך שטבלאות
+  של 64 או 128 שורות נשארות קלות לבדיקה (הסיכום מציג "k of n rows").
 
 #### 〰 מציג גלים מובנה ושילוב עם GTKWave
 
@@ -691,6 +751,33 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 * ברירת המחדל היא אותות רמת הטסטבנץ'; מסמנים **Internal signals** כדי לראות גם אותות פנימיים של `uut`.
 * אין `.vcd`? דיאגרמת הגלים נבנית משורות טבלת האמת.
 * `📈 Open in GTKWave` פותח את אותו קובץ ב-GTKWave.
+
+#### 🌳 ניתוח היררכיה וספירת שערים + תרשים פינים (לשונית `HIERARCHY & GATES`)
+
+* **עץ מופעים** של המודול הפעיל על פני תיקיית העבודה וכל החבילות הפעילות – למשל
+  `FA ← ha1 : HalfAdder ← g1 : xor, g2 : and`. כל שורה מציגה איפה המודול מוגדר (קובץ + חבילה); לחיצה על מופע פותחת
+  את קובץ ה-`.v` שלו (תצוגה לקריאה בלבד לקובצי חבילות).
+* **ספירת שערים שטוחה** על כל ההיררכיה (`NAND`, `NOR`, `XOR`, `XNOR`, `AND`, `OR`, `NOT`, `BUF`), מספר מופעי תתי-המודולים,
+  מודולים חסרים ו**הערכת עומק לוגי** ברמות שערים (ניתוח סטטי: לולאות generate ומערכי מופעים נספרים פעם אחת).
+* **תרשים שבב (IC)** בסגנון VS Code: כניסות משמאל, יציאות/inout מימין, אפיקים מצוירים כקו כפול עם הטווח `[msb:lsb]`,
+  ושם המודול עם מספר השערים והעומק על השבב.
+
+#### ⌨ השלמה אוטומטית (`Ctrl+Space`) ורמזי פורטים
+
+* `Ctrl+Space` פותח רשימת השלמות עם כל המודולים מתיקיית העבודה ומהחבילות הפעילות (מוסיף מופע מלא עם פורטים בשם
+  `HalfAdder u_halfadder ( .s (), .c (), … );` והסמן בפורט הראשון), הפורטים/ה-wire/ה-reg שהוגדרו בקובץ הנוכחי (בלי
+  שגיאות הקלדה שיוצרות חוטים מרומזים), ומילות מפתח ומשימות מערכת (`$display`, `$monitor`, `$finish`, `$dumpvars`…).
+  חיצים + `Enter`/`Tab` לבחירה, `Esc` לסגירה.
+* כשהסמן על שם של מודול, שורת הסטטוס מציגה את חתימת הפורטים שלו ואת החבילה, למשל
+  `◆ HalfAdder (output s, output c, input a, input b) · Lab4`.
+
+#### 📦 הגשת תרגיל בלחיצה אחת (`📦 Export HW .zip`)
+
+* הכפתור `📦 Export HW .zip` בסייר (או `📤`) אורז את כל קובצי ה-`.v` / `_tb.v` / `.vh` של תיקיית העבודה ל-
+  `<Workspace>_Submission.zip`, ומשאיר בחוץ קובצי `vvp` מקומפלים, קובצי `.vcd`, קובצי zip וקבצים זמניים/גיבוי.
+* הוא בודק אם התכנון שלכם משתמש במודולי עזר **שלא נמצאים בספריית הקורס וגם לא בתיקייה** (מודולים מחבילות שיובאו או
+  קושרו) ומציע לצרף אותם – כל אחד כקובץ `<Module>.v` עצמאי, יחד עם קובצי כותרת שהוא עושה להם `` `include`` – כך שהבודק
+  יוכל לקמפל את ה-zip עם הפקודה הרגילה של הקורס.
 
 #### 🧹 ניקוי לפני הגשת תרגיל
 
@@ -829,6 +916,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | `Ctrl+,` | הגדרות |
 | `Ctrl+F` / `Ctrl+H` | חיפוש / חיפוש והחלפה (`Enter`, `Shift+Enter`, `F3` = הבא/הקודם) |
 | `Ctrl+G` | מעבר לשורה |
+| `Ctrl+Space` | השלמה אוטומטית: מודולים (מופע מלא), אותות מקומיים, מילות מפתח, משימות מערכת |
 | `Ctrl+/` | הוספה/הסרה של הערת `//` בשורות המסומנות |
 | `Ctrl+D` | שכפול שורה / בחירה |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | ביטול / ביצוע מחדש |
