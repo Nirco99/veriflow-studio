@@ -105,13 +105,269 @@ def ui_px(widget, delta: int = 0) -> int:
     return max(9, round((FontBook.base + delta) * ui_scale(widget)))
 
 
-def style_menu(menu: tk.Menu, widget, config) -> None:
-    """Readable dark/light context menu: Segoe UI at the UI font size, VS Code colours."""
+def style_menu(menu, widget, config) -> None:
+    """Readable dark/light context menu: Segoe UI at the UI font size, VS Code colours (DarkMenu or a fallback tk.Menu)."""
+    if isinstance(menu, DarkMenu):
+        menu.cfg = config
+        return
     dark = is_dark(config)
     th = VSCODE_THEMES["Dark" if dark else "Light"]
     menu.configure(font=("Segoe UI", -ui_px(widget, -1)), bg=th["group"], fg="#F0F0F0" if dark else "#1F1F1F",
                    activebackground=th["selected"], activeforeground="#FFFFFF" if dark else "#000000",
                    disabledforeground=th["muted"], bd=1, relief="solid", activeborderwidth=0, tearoff=0)
+
+
+class DarkMenu:
+    """VS Code style context menu: borderless dark popup, Segoe UI at the UI font size, 32px hover rows,
+    right-aligned shortcuts and side-opening submenus. Closes on Escape, a click elsewhere or when the app loses focus.
+
+    Drop-in for the tk.Menu calls the app uses: add_command / add_separator / add_cascade / tk_popup / grab_release."""
+
+    _open: "DarkMenu | None" = None          # the root menu currently shown (only one at a time)
+
+    def __init__(self, master, config=None):
+        self.master, self.cfg = master, config
+        self.items: list[dict] = []
+        self.win: tk.Toplevel | None = None
+        self.parent: DarkMenu | None = None
+        self.child: DarkMenu | None = None
+        self.rows: list[tuple[dict, tk.Frame, list]] = []
+        self.active = -1
+        self._bind_id = None
+
+    # ---- tk.Menu-compatible building API
+    def add_command(self, label: str, command=None, accelerator: str = "", state: str = "normal") -> None:
+        self.items.append({"kind": "command", "label": label, "command": command, "accel": accelerator, "state": state})
+
+    def add_separator(self) -> None:
+        self.items.append({"kind": "sep"})
+
+    def add_cascade(self, label: str, menu: "DarkMenu") -> None:
+        menu.parent = self
+        self.items.append({"kind": "cascade", "label": label, "menu": menu, "state": "normal"})
+
+    def delete(self, *_a) -> None:
+        self.items.clear()
+
+    def configure(self, **_kw) -> None:      # tk.Menu styling calls are harmless no-ops
+        pass
+
+    def cget(self, key: str):
+        return ("Segoe UI", -ui_px(self.master)) if key == "font" else self._theme().get(key)
+
+    def grab_release(self) -> None:
+        pass
+
+    def index(self, _what="end") -> int:
+        return len(self.items) - 1 if self.items else -1
+
+    def _theme(self) -> dict:
+        dark = is_dark(self.cfg) if self.cfg is not None else ctk.get_appearance_mode() == "Dark"
+        return {"bg": "#252526" if dark else "#FFFFFF", "border": "#3C3C3C" if dark else "#CECECE",
+                "fg": "#F0F0F0" if dark else "#1F1F1F", "muted": "#9D9D9D" if dark else "#767676",
+                "activebackground": "#04395E" if dark else "#E4E6F1", "activeforeground": "#FFFFFF" if dark else "#000000",
+                "sep": "#454545" if dark else "#E5E5E5", "disabled": "#6B6B6B" if dark else "#A0A0A0"}
+
+    # ---- showing / hiding
+    def tk_popup(self, x: int, y: int, _entry=None) -> None:
+        if self.parent is None:
+            if DarkMenu._open is not None:
+                DarkMenu._open.close_all()
+            DarkMenu._open = self
+        self._build(x, y)
+
+    def _build(self, x: int, y: int) -> None:
+        self._destroy_window()
+        th, sc = self._theme(), ui_scale(self.master)
+        px = ui_px(self.master)
+        f, fa = ("Segoe UI", -px), ("Segoe UI", -max(9, px - round(1 * sc)))
+        row_h, pad = int(32 * sc * FontBook.base / 13), int(12 * sc)
+        w = self.win = tk.Toplevel(self.master)
+        w.withdraw()
+        w.overrideredirect(True)
+        try:
+            w.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        w.configure(bg=th["border"])
+        body = tk.Frame(w, bg=th["bg"], bd=0, highlightthickness=0)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Frame(body, height=int(4 * sc), bg=th["bg"]).pack(fill="x")
+        self.rows, self.active = [], -1
+        for it in self.items:
+            if it["kind"] == "sep":
+                tk.Frame(body, height=max(1, int(1 * sc)), bg=th["sep"]).pack(fill="x", padx=int(8 * sc), pady=int(4 * sc))
+                continue
+            disabled = it.get("state") == "disabled"
+            row = tk.Frame(body, bg=th["bg"], height=row_h, cursor="hand2" if not disabled else "")
+            row.pack(fill="x", padx=int(4 * sc))
+            row.pack_propagate(False)
+            fg = th["disabled"] if disabled else th["fg"]
+            lab = tk.Label(row, text=it["label"], font=f, bg=th["bg"], fg=fg, anchor="w")
+            lab.pack(side="left", fill="y", padx=(pad, int(32 * sc)))
+            right = it.get("accel") or ("›" if it["kind"] == "cascade" else "")
+            widgets = [row, lab]
+            if right:
+                acc = tk.Label(row, text=right, font=fa if it["kind"] == "command" else f, bg=th["bg"],
+                               fg=th["muted"] if not disabled else th["disabled"], anchor="e")
+                acc.pack(side="right", fill="y", padx=(int(24 * sc), pad))
+                widgets.append(acc)
+            idx = len(self.rows)
+            self.rows.append((it, row, widgets))
+            for wd in widgets:
+                wd.bind("<Enter>", lambda e, i=idx: self._hover(i))
+                wd.bind("<ButtonRelease-1>", lambda e, i=idx: self._activate(i))
+        tk.Frame(body, height=int(4 * sc), bg=th["bg"]).pack(fill="x")
+        w.update_idletasks()
+        ww, wh = w.winfo_reqwidth(), w.winfo_reqheight()
+        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        x = min(x, sw - ww - 4) if self.parent is None else (x if x + ww <= sw else x - ww - self.parent.win.winfo_width())
+        y = min(y, sh - wh - 4)
+        w.geometry(f"+{max(0, x)}+{max(0, y)}")
+        w.deiconify()
+        w.lift()
+        w.bind("<Escape>", lambda e: self.close_all())
+        w.bind("<Up>", lambda e: self._move(-1))
+        w.bind("<Down>", lambda e: self._move(1))
+        w.bind("<Return>", lambda e: self.active >= 0 and self._activate(self.active))
+        w.bind("<Right>", lambda e: self.active >= 0 and self.rows[self.active][0]["kind"] == "cascade" and self._activate(self.active))
+        w.bind("<Left>", lambda e: self.parent is not None and self.close())
+        w.bind("<FocusOut>", lambda e: self.master.after(80, self._check_focus))
+        w.focus_force()
+        if self.parent is None:      # a click anywhere else in the app closes the menu (armed after this event)
+            self.master.after_idle(self._arm_outside_click)
+
+    def _arm_outside_click(self) -> None:
+        if self.win is None or self._bind_id is not None:
+            return
+        root = self.master.winfo_toplevel()
+        # specific buttons: CustomTkinter binds <Button-1> on "all", which would shadow a generic <ButtonPress>
+        self._bind_id = {seq: root.bind_all(seq, self._click_anywhere, add="+") for seq in ("<Button-1>", "<Button-2>", "<Button-3>")}
+
+    def _hover(self, i: int) -> None:
+        th = self._theme()
+        for j, (it, row, widgets) in enumerate(self.rows):
+            on = j == i and it.get("state") != "disabled"
+            for wd in widgets:
+                wd.configure(bg=th["activebackground"] if on else th["bg"])
+                if wd is widgets[1] and it.get("state") != "disabled":
+                    wd.configure(fg=th["activeforeground"] if on else th["fg"])
+        self.active = i
+        it = self.rows[i][0]
+        if self.child is not None and (it["kind"] != "cascade" or it["menu"] is not self.child):
+            self.child.close()
+        if it["kind"] == "cascade" and self.child is None:
+            self._open_child(i)
+
+    def _move(self, d: int) -> None:
+        if not self.rows:
+            return
+        i = self.active
+        for _ in range(len(self.rows)):
+            i = (i + d) % len(self.rows)
+            if self.rows[i][0].get("state") != "disabled":
+                break
+        self._hover(i)
+
+    def _open_child(self, i: int) -> None:
+        it, row, _w = self.rows[i]
+        menu: DarkMenu = it["menu"]
+        self.child = menu
+        menu.parent = self
+        menu._build(self.win.winfo_rootx() + self.win.winfo_width() - 2, row.winfo_rooty() - int(4 * ui_scale(self.master)))
+
+    def _activate(self, i: int) -> None:
+        it = self.rows[i][0]
+        if it.get("state") == "disabled":
+            return
+        if it["kind"] == "cascade":
+            if self.child is None:
+                self._open_child(i)
+            if self.child is not None and self.child.rows:
+                self.child.win.focus_force()
+                self.child._hover(0)
+            return
+        cmd = it.get("command")
+        self.close_all()
+        if cmd:
+            self.master.after_idle(cmd)
+
+    def _windows(self) -> list:
+        root = self
+        while root.parent is not None:
+            root = root.parent
+        out, m = [], root
+        while m is not None:
+            if m.win is not None:
+                out.append(m.win)
+            m = m.child
+        return out
+
+    def _inside(self, widget) -> bool:
+        wins = {str(w) for w in self._windows()}
+        while widget is not None:
+            if str(widget) in wins:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
+
+    def _click_anywhere(self, e) -> None:
+        try:
+            inside = self._inside(e.widget) if not isinstance(e.widget, str) else False
+        except Exception:
+            inside = False
+        if not inside:
+            self.close_all()
+
+    def _check_focus(self) -> None:
+        if self.win is None:
+            return
+        try:
+            focus = self.master.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus is None or not self._inside(focus):
+            self.close_all()
+
+    def _destroy_window(self) -> None:
+        if self.child is not None:
+            self.child.close()
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except tk.TclError:
+                pass
+            self.win = None
+
+    def close(self) -> None:
+        self._destroy_window()
+        if self.parent is not None:
+            if self.parent.child is self:
+                self.parent.child = None
+            if self.parent.win is not None:
+                self.parent.win.focus_force()
+
+    def close_all(self) -> None:
+        root = self
+        while root.parent is not None and root.parent.win is not None:
+            root = root.parent
+        root._destroy_window()
+        if root._bind_id is not None:
+            top = root.master.winfo_toplevel()
+            for seq, fid in root._bind_id.items():
+                try:      # remove only our handler, keep CustomTkinter's (and anyone else's) "all" bindings
+                    script = top.tk.call("bind", "all", seq)
+                    top.tk.call("bind", "all", seq, "\n".join(l for l in str(script).split("\n") if fid not in l))
+                    top.deletecommand(fid)
+                except tk.TclError:
+                    pass
+            root._bind_id = None
+        if DarkMenu._open is root:
+            DarkMenu._open = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.win is not None
 
 
 def is_dark(config) -> bool:
@@ -231,9 +487,53 @@ def vline(master, **kw) -> ctk.CTkFrame:
     return ctk.CTkFrame(master, width=1, corner_radius=0, fg_color=VS["border"], **kw)
 
 
+def _skip_nested_idle(cls) -> None:
+    """CTkScrollbar/CTkOptionMenu._draw() end with canvas.update_idletasks(), which forces a full re-layout of the whole
+    window on every redraw: a font zoom made ~a dozen of them (10 s per zoom step). Painting at the next idle is enough."""
+    orig = cls._draw
+
+    def _draw(self, *a, **k):
+        cv = getattr(self, "_canvas", None)
+        if cv is not None and "update_idletasks" not in cv.__dict__:
+            cv.update_idletasks = lambda: None
+        return orig(self, *a, **k)
+    cls._draw = _draw
+
+
+for _cls in (ctk.CTkScrollbar, ctk.CTkOptionMenu):
+    _skip_nested_idle(_cls)
+
+
+class SafeScrollbar(ctk.CTkScrollbar):
+    """CTkScrollbar whose set() redraws on a 1 ms timer. The stock set() draws immediately and its _draw() calls
+    update_idletasks(), so a Text/Treeview re-laying out (font zoom, a covering Welcome page) could feed set() back into
+    itself without end. Timer callbacks never run inside update_idletasks(), which breaks that cycle."""
+    _vf_job = None
+
+    def set(self, start_value: float, end_value: float) -> None:
+        self._start_value, self._end_value = float(start_value), float(end_value)
+        if self._vf_job is None:
+            self._vf_job = self.after(1, self._vf_draw)
+
+    def _vf_draw(self) -> None:
+        self._vf_job = None
+        try:
+            self._draw()
+        except tk.TclError:
+            pass
+
+    def destroy(self) -> None:
+        if self._vf_job is not None:
+            try:
+                self.after_cancel(self._vf_job)
+            except tk.TclError:
+                pass
+        super().destroy()
+
+
 def slim_scrollbar(master, command, orientation: str = "vertical") -> ctk.CTkScrollbar:
-    return ctk.CTkScrollbar(master, command=command, orientation=orientation, width=12, corner_radius=4,
-                            fg_color="transparent", button_color=VS["scroll_thumb"], button_hover_color=VS["scroll_hover"])
+    return SafeScrollbar(master, command=command, orientation=orientation, width=12, corner_radius=4,
+                         fg_color="transparent", button_color=VS["scroll_thumb"], button_hover_color=VS["scroll_hover"])
 
 
 # =========================================================================== code editor
@@ -646,23 +946,23 @@ class VerilogCodeEditor(ctk.CTkFrame):
 
     # ------------------------------------------------------------------ menus & keys
     def _build_menu(self) -> None:
-        m = tk.Menu(self, tearoff=0, bd=0)
-        m.add_command(label="Undo   Ctrl+Z", command=lambda: self._action("undo"))
-        m.add_command(label="Redo   Ctrl+Y", command=lambda: self._action("redo"))
+        m = DarkMenu(self, self.cfg)
+        m.add_command(label="Undo", command=lambda: self._action("undo"), accelerator="Ctrl+Z")
+        m.add_command(label="Redo", command=lambda: self._action("redo"), accelerator="Ctrl+Y")
         m.add_separator()
-        m.add_command(label="Cut", command=lambda: self._action("cut"))
-        m.add_command(label="Copy", command=lambda: self._action("copy"))
-        m.add_command(label="Paste", command=lambda: self._action("paste"))
+        m.add_command(label="Cut", command=lambda: self._action("cut"), accelerator="Ctrl+X")
+        m.add_command(label="Copy", command=lambda: self._action("copy"), accelerator="Ctrl+C")
+        m.add_command(label="Paste", command=lambda: self._action("paste"), accelerator="Ctrl+V")
         m.add_separator()
-        sub = tk.Menu(m, tearoff=0)
+        sub = DarkMenu(self, self.cfg)
         for name, snip in SNIPPETS.items():
             sub.add_command(label=name, command=lambda s=snip: self.insert_snippet(s))
         m.add_cascade(label="Insert Snippet", menu=sub)
         m.add_separator()
-        m.add_command(label="Toggle Comment   Ctrl+/", command=self.toggle_comment)
-        m.add_command(label="Duplicate Line   Ctrl+D", command=self.duplicate_line)
-        m.add_command(label="Find / Replace   Ctrl+F", command=self.show_find)
-        m.add_command(label="Go to Line…      Ctrl+G", command=self.prompt_goto_line)
+        m.add_command(label="Toggle Comment", command=self.toggle_comment, accelerator="Ctrl+/")
+        m.add_command(label="Duplicate Line", command=self.duplicate_line, accelerator="Ctrl+D")
+        m.add_command(label="Find / Replace", command=self.show_find, accelerator="Ctrl+F")
+        m.add_command(label="Go to Line…", command=self.prompt_goto_line, accelerator="Ctrl+G")
         self.menu, self.snippet_menu = m, sub
 
     def _bind_keys(self) -> None:

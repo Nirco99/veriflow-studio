@@ -13,7 +13,7 @@ echo === Installing requirements ===
 python -m pip install --upgrade -r requirements.txt || goto :fail
 
 echo === Syntax check ===
-python -m py_compile config_manager.py verilog_parser.py verilog_runner.py package_manager.py ui_components.py main.py || goto :fail
+python -m py_compile config_manager.py verilog_parser.py verilog_runner.py package_manager.py updater.py welcome.py ui_components.py main.py || goto :fail
 
 echo === Building VeriFlowStudio.exe ===
 python -m PyInstaller --noconfirm --clean --onefile --windowed ^

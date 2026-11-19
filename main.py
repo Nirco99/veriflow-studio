@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import webbrowser
 import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -21,16 +22,19 @@ import customtkinter as ctk
 
 from config_manager import (TEXT_SIZE_PRESETS, ACCENT, APP_NAME, APP_VERSION, CHOICES, DARK_SCHEME, DEFAULT_CONFIG, EDITOR_SCHEMES,
                             FONT_FAMILIES, LIGHT_SCHEME, RADIXES, RUN_GREEN, RUN_GREEN_HOVER, STATUS_COLORS, STOP_RED,
-                            STOP_RED_HOVER, VS, VSCODE_THEMES, ConfigManager, detect_toolchains, resource_dir)
+                            STARTUP_LABELS, STOP_RED_HOVER, VS, VSCODE_THEMES, ConfigManager, detect_toolchains,
+                            resource_dir)
 from ui_components import (SNIPPETS, ActivityBar, MiniWaveformViewer, PanelTabs, SideSection, TruthTableGrid,
                            VerilogCodeEditor, entry_style, ghost_button, hline, icon_button, is_dark, option_style,
-                           FontBook, PinoutDiagram, _Tooltip, seg_style, slim_scrollbar, style_menu, style_treeview, ui_font,
+                           DarkMenu, FontBook, PinoutDiagram, _Tooltip, seg_style, slim_scrollbar, style_menu, style_treeview, ui_font,
                            ui_px, ui_scale, vline)
 from verilog_parser import (analyze_hierarchy, describe_ports, generate_testbench_skeleton, instantiation_template,
                             new_module_template,
                             parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
 from verilog_runner import NO_WINDOW, STATUS_FAIL, STATUS_XZ, VerilogRunner, clean_binaries, format_cmd
 from package_manager import DEFAULT_IMPORT_PACKAGE, PackageManager
+from updater import AutoUpdater, app_dir, is_frozen
+from welcome import NewModuleDialog, UpdateNotice, WelcomeView
 from verilog_parser import parse_verilog_source
 
 # file.v:12 / C:\\dir with spaces\\x.v:3:7 / mux_lib.vh:5 inside console text
@@ -113,6 +117,10 @@ class SettingsDialog(ctk.CTkToplevel):
                                           ("Auto-save before Run (F5)", "auto_save_before_run"),
                                           ("Auto-save on focus loss", "auto_save_on_focus_loss")), start=2):
             self._switch(t2, r, label, key)
+        self._option(t2, 9, "On startup", "startup_mode", list(STARTUP_LABELS.values()),
+                     to_cfg=lambda s: next(k for k, v in STARTUP_LABELS.items() if v == s), to_ui=lambda v: STARTUP_LABELS[v])
+        self._switch(t2, 10, "Check GitHub for updates (on startup and every 30 min)", "check_for_updates")
+        ghost_button(t2, "🔔 Check for Updates Now", app.check_updates_now).grid(row=11, column=1, sticky="w", pady=(6, 4))
 
         for r, (label, key, folder) in enumerate((("iverilog.exe", "iverilog_path", False), ("vvp.exe", "vvp_path", False),
                                                   ("gtkwave.exe", "gtkwave_path", False), ("Lecturer library (-y)", "lib_dir", True),
@@ -419,6 +427,12 @@ class VeriFlowApp(ctk.CTk):
         self._live_job = None
         self._toast_job = None
         self._toast: ctk.CTkFrame | None = None
+        self._upd_q: queue.Queue = queue.Queue()
+        self._update_info = None
+        self._update_dismissed = ""
+        self._update_notice: UpdateNotice | None = None
+        self._update_busy = False
+        self._update_manual = False
         self.work_dir: Path | None = None
         self.module: str | None = None
         self.modules: dict[str, dict] = {}
@@ -476,7 +490,7 @@ class VeriFlowApp(ctk.CTk):
         for w, full, short, _tip in self._tb_items:
             w.configure(text=short if compact else full)
         self.recent_menu.configure(width=86 if compact else 96)
-        self.snippet_menu.configure(width=80 if compact else 100)
+        self.snippet_menu.configure(width=100)
 
     def _schedule_fit_toolbar(self, reset: bool = False) -> None:
         if reset:                                   # fonts changed: re-measure from the full labels
@@ -512,6 +526,8 @@ class VeriFlowApp(ctk.CTk):
 
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.grid(row=0, column=0, padx=(8, 0))
+        self._tb(icon_button(left, "🏠 Welcome", self.show_welcome, width=0, height=26, font=font(12)), "🏠 Welcome", "🏠",
+                 "Welcome / Get Started").pack(side="left", padx=(0, 4))
         self._tb(ghost_button(left, "📂 Open…", self.choose_folder, height=26), "📂 Open…", "📂",
                  "Open a workspace folder").pack(side="left", padx=(0, 4))
         self.recent_menu = ctk.CTkOptionMenu(left, values=[RECENT_LABEL], width=96, command=self._open_recent, **option_style())
@@ -586,7 +602,8 @@ class VeriFlowApp(ctk.CTk):
         body.grid_columnconfigure(2, weight=1)
         self.activity = ActivityBar(body, [("explorer", "📁", "Explorer  (Ctrl+B)"), ("library", "📚", "Library & Packages"),
                                            ("run", "▶", "Run & Compile"), ("npp", "📝", "Open in Notepad++")],
-                                    [("settings", "⚙", "Settings  (Ctrl+,)")], self._on_activity)
+                                    [("welcome", "🏠", "Welcome / Get Started"), ("settings", "⚙", "Settings  (Ctrl+,)")],
+                                    self._on_activity)
         self.activity.grid(row=0, column=0, sticky="ns")
         vline(body).grid(row=0, column=1, sticky="ns")
         self.hpane = tk.PanedWindow(body, orient="horizontal", sashwidth=max(2, int(2 * sc)), bd=0, sashrelief="flat")
@@ -618,6 +635,7 @@ class VeriFlowApp(ctk.CTk):
         for ed in (self.design_ed, self.tb_ed):
             ed.completion_provider = lambda: list(self._known_cache.values())
         self.active_editor = self.design_ed
+        self.welcome = WelcomeView(self.ed_area, self)        # overlays the editor group while shown
         self.vpane.add(self.ed_area, minsize=int(200 * sc), stretch="always")
         self.vpane.add(self._build_panel(self.vpane), minsize=int(150 * sc), height=int(300 * sc))
         self._layout_editors()
@@ -646,7 +664,8 @@ class VeriFlowApp(ctk.CTk):
         v = ctk.CTkFrame(parent, corner_radius=0, fg_color=VS["sidebar"])
         v.grid_columnconfigure(0, weight=1)
         self.explorer_title = self._side_header(v, "EXPLORER", [("+", self.new_module), ("↻", self._refresh_workspace),
-                                                                ("📂", self.choose_folder), ("📤", self.export_submission)])
+                                                                ("📂", self.choose_folder), ("📤", self.export_submission),
+                                                                ("✕", self.close_folder)])
         weights = {1: 3, 2: 1}
 
         def toggled(sec):
@@ -856,6 +875,8 @@ class VeriFlowApp(ctk.CTk):
         item(10, "UTF-8")
         self.st_std = item(11, "SystemVerilog (-g2012)", click=lambda: self._show_view("run", force=True))
         self.st_tool = item(12, "", click=self.open_settings)
+        self.st_update = item(13, "", click=self._reopen_update_notice)
+        self.st_update.grid_remove()
 
     def _status_hover(self) -> str:
         """VS Code lightens a status-bar item on hover."""
@@ -890,14 +911,17 @@ class VeriFlowApp(ctk.CTk):
         self._load_library()
         if self.cfg["live_sync_enabled"]:
             self.sync_switch.select()
+        mode = self.cfg["startup_mode"]
         folder = Path(self.cfg["last_workspace_dir"]) if self.cfg["last_workspace_dir"] else None
-        if folder and folder.is_dir():
+        if self.work_dir is not None:
+            pass                                    # a folder was passed on the command line
+        elif mode == "reopen_last" and folder and folder.is_dir():
             self.open_workspace(folder)
-        else:
-            sample = self._sample_dir()
-            if sample:
-                self.open_workspace(sample)
+        elif mode != "empty_window":
+            self.show_welcome()                     # welcome_screen, or nothing to reopen
         self._restart_sync()
+        if self.cfg["check_for_updates"]:
+            self.after(1500, self._check_updates)
         self._sync_run_view()
         self._refresh_status_items()
         self.log(f"{APP_NAME} {APP_VERSION} ready.  F5 Run · F7 Lint · Ctrl+B side bar · Ctrl+F find · Ctrl+G go to line · "
@@ -923,12 +947,14 @@ class VeriFlowApp(ctk.CTk):
         sc = self.cfg.scheme
         self.hpane.configure(bg=th["border"])
         self.vpane.configure(bg=th["border"])
+        self._theme_job = None
         style_treeview(self.style, self.cfg, ui_scale(self))
-        FontBook.set_base(self.cfg["ui_font_size"])
-        self.option_add("*Menu.font", ("Segoe UI", -ui_px(self, -1)))
-        self.statusbar.configure(height=int(26 * self.sc * FontBook.base / 13))
-        self.titlebar.configure(height=int(40 * FontBook.base / 13))
-        self._schedule_fit_toolbar(reset=True)
+        if FontBook.base != self.cfg["ui_font_size"]:      # re-flowing every CTk widget is the costly part of a zoom
+            FontBook.set_base(self.cfg["ui_font_size"])
+            self.option_add("*Menu.font", ("Segoe UI", -ui_px(self, -1)))
+            self.statusbar.configure(height=int(26 * self.sc * FontBook.base / 13))
+            self.titlebar.configure(height=int(40 * FontBook.base / 13))
+            self._schedule_fit_toolbar(reset=True)
         for lab in self._st_labels:
             lab.configure(font=("Segoe UI", -ui_px(self, -1)))
         for ed in (self.design_ed, self.tb_ed):
@@ -984,8 +1010,10 @@ class VeriFlowApp(ctk.CTk):
         visual = {"appearance_mode", "editor_color_scheme", "editor_font_family", "editor_font_size", "console_font_size",
                   "ui_font_size",
                   "tab_size", "word_wrap", "highlight_current_line", "insert_spaces_for_tabs", "ui_scale_percent"}
-        if keys & visual:
-            self.after(30, self._apply_theme)
+        if keys & visual:          # debounced: a burst of Ctrl+wheel / A+ steps re-flows the UI once
+            if getattr(self, "_theme_job", None):
+                self.after_cancel(self._theme_job)
+            self._theme_job = self.after(150, self._apply_theme)
         if keys - {"sidebar_view", "sidebar_visible", "last_module", "last_workspace_dir", "recent_workspaces"}:
             self._sync_run_view()
             self._refresh_status_items()
@@ -1050,6 +1078,7 @@ class VeriFlowApp(ctk.CTk):
             self.cfg.update(editor_font_size=self.cfg["editor_font_size"] + delta,
                             console_font_size=self.cfg["console_font_size"] + delta,
                             ui_font_size=self.cfg["ui_font_size"] + delta)
+        self.font_lbl.configure(text=f"{self.cfg['editor_font_size']}pt")      # instant feedback; the re-flow is debounced
 
     def open_settings(self) -> None:
         if self._settings is not None and self._settings.winfo_exists():
@@ -1060,7 +1089,9 @@ class VeriFlowApp(ctk.CTk):
 
     # ================================================================== activity bar / side bar
     def _on_activity(self, key: str) -> None:
-        if key == "npp":
+        if key == "welcome":
+            self.show_welcome()
+        elif key == "npp":
             self.open_in_npp()
         elif key == "settings":
             self.open_settings()
@@ -1171,6 +1202,7 @@ class VeriFlowApp(ctk.CTk):
         if not self._confirm_discard():
             return
         self.work_dir = folder.resolve()
+        self.hide_welcome()
         self.cfg.add_recent_workspace(self.work_dir)
         self._refresh_recent_menu()
         self.ws_label.configure(text=str(self.work_dir))
@@ -1924,8 +1956,7 @@ class VeriFlowApp(ctk.CTk):
 
     # ---- module context menus
     def _module_menu(self, e, name: str) -> None:
-        m = tk.Menu(self, tearoff=0)
-        style_menu(m, self, self.cfg)
+        m = DarkMenu(self, self.cfg)
         m.add_command(label=f"Open {name}", command=lambda: self.select_module(name))
         m.add_separator()
         m.add_command(label="🧪 Generate Testbench (exhaustive)", command=lambda: self._tb_for(name, False))
@@ -2126,27 +2157,239 @@ class VeriFlowApp(ctk.CTk):
                 + (f", self-checking {', '.join(checks)}" if checks else ""))
         self.log(f"🧪 Generated {tb.name} ({kind}). Press F5 to run.", "ok")
 
-    def new_module(self) -> None:
-        if not self.work_dir:
-            messagebox.showinfo(APP_NAME, "Open a workspace folder first.", parent=self)
+    def _default_parent(self) -> Path:
+        p = Path(self.cfg["last_parent_dir"]) if self.cfg["last_parent_dir"] else None
+        return p if p and p.is_dir() else Path.home() / "Documents"
+
+    def new_module(self) -> NewModuleDialog:
+        """Ctrl+N: module name, target folder (browse / create a subfolder), optional ports and testbench."""
+        return NewModuleDialog(self, project=False, location=self.work_dir or self._default_parent())
+
+    def new_project(self) -> NewModuleDialog:
+        """Ctrl+Shift+N: a new assignment folder (e.g. Documents\\CompStruct\\Lab4) with its first module + testbench."""
+        return NewModuleDialog(self, project=True, location=self.work_dir.parent if self.work_dir else self._default_parent())
+
+    def finish_new_module(self, result: dict) -> None:
+        folder, name = Path(result["folder"]).resolve(), result["module"]
+        if self.work_dir is not None and self.work_dir == folder:
+            self._scan_workspace(force=True)
+            self.select_module(name)
+        else:
+            self.open_workspace(folder)
+            if self.work_dir == folder and self.module != name:
+                self.select_module(name, confirm=False)
+        made = ", ".join(p.name for p in result["files"])
+        self.log(f"✨ Created {made} in {folder}" + (" - press F5 to run." if len(result["files"]) > 1
+                                                     else " - add a testbench with 🧪 Gen _tb.v."), "ok")
+        if result.get("npp") and self.work_dir == folder:
+            self.open_in_npp()
+
+    def open_single_file(self) -> None:
+        f = filedialog.askopenfilename(parent=self, title="Open a Verilog file", initialdir=str(self.work_dir or self._default_parent()),
+                                       filetypes=[("Verilog", "*.v *.sv *.vh"), ("All files", "*.*")])
+        if not f:
             return
-        name = ctk.CTkInputDialog(text="New module name (also the file name):", title="New Module").get_input()
-        if not name:
-            return
-        name = name.strip()
-        if not re.fullmatch(r"[A-Za-z_]\w*", name):
-            messagebox.showerror("New Module", "Use a Verilog identifier: letters, digits, '_' (not starting with a digit).", parent=self)
-            return
-        path = self.work_dir / f"{name}.v"
-        if path.exists() or any(n.lower() == name.lower() for n in self.modules):
-            messagebox.showerror("New Module", f"{path.name} (or a case-variant) already exists.", parent=self)
+        path = Path(f)
+        self.open_workspace(path.parent)
+        stem = path.stem[:-3] if path.stem.lower().endswith("_tb") else path.stem
+        if self.work_dir == path.parent.resolve():
+            if stem in self.modules and self.module != stem:
+                self.select_module(stem, confirm=False)
+            elif stem not in self.modules:
+                self._preview_file(path)
+
+    def open_sample_project(self) -> None:
+        sample = self._sample_dir()
+        if sample:
+            self.open_workspace(sample)
+        else:
+            messagebox.showwarning(APP_NAME, "The built-in sample project could not be found.", parent=self)
+
+    def open_recent_path(self, path: str) -> None:
+        if Path(path).is_dir():
+            self.open_workspace(Path(path))
+        elif messagebox.askyesno("Recent", f"This folder no longer exists:\n{path}\n\nRemove it from the Recent list?", parent=self):
+            self.cfg.update(recent_workspaces=[r for r in self.cfg["recent_workspaces"] if r != path])
+            self._refresh_recent_menu()
+            self.welcome.refresh()
+
+    # ---- Welcome page / Close Folder
+    def show_welcome(self) -> None:
+        self.welcome.refresh()
+        self.welcome.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.welcome.lift()
+        if not getattr(self, "_welcome_shown", False):
+            self.after(60, self._welcome_room)
+        self._welcome_shown = True
+
+    def _welcome_room(self) -> None:
+        """Like VS Code's Welcome tab: give the editor area most of the height while it is shown (panel restored later)."""
+        try:
+            self.update_idletasks()
+            total = self.vpane.winfo_height()
+            y = self.vpane.sash_coord(0)[1]
+            want = total - int(170 * self.sc)
+            if total > 300 and y < want:
+                self._panel_sash = y
+                self.vpane.sash_place(0, 0, want)
+        except tk.TclError:
+            pass
+
+    def hide_welcome(self) -> None:
+        self.welcome.place_forget()
+        self._welcome_shown = False
+        y, self._panel_sash = getattr(self, "_panel_sash", None), None
+        if y is not None:
+            try:
+                self.vpane.sash_place(0, 0, y)
+            except tk.TclError:
+                pass
+
+    def close_folder(self) -> None:
+        """VS Code 'Close Folder': back to the Welcome page; the next start does not reopen this folder."""
+        if self.work_dir is None:
+            self.show_welcome()
             return
         if not self._confirm_discard():
             return
-        path.write_text(new_module_template(name), encoding="utf-8")
-        self._scan_workspace(force=True)
-        self.select_module(name, confirm=False)
-        self.log(f"Created {path.name}. Edit the ports/gates, then click 🧪 Gen _tb.v.", "ok")
+        self.runner.stop()
+        self.work_dir, self.module = None, None
+        self.modules, self.ws_modules, self.extra_vars = {}, {}, {}
+        self.lint_diags, self.run_diags, self.live_diags = [], [], []
+        self._ws_signature = None
+        for ed in (self.design_ed, self.tb_ed):
+            ed.set_content("", None)
+        self._render_module_list()
+        self._render_extra_files()
+        self.module_menu.configure(values=["(no modules)"])
+        self.module_menu.set("(no modules)")
+        self.ws_label.configure(text="No folder open")
+        self.explorer_title.configure(text="EXPLORER: NO FOLDER OPENED")
+        self.title(f"{APP_NAME} {APP_VERSION}")
+        self.cfg.update(last_workspace_dir="")
+        self._refresh_problems()
+        self._refresh_status_items()
+        self.show_welcome()
+
+    # ---- GitHub auto-update
+    def _check_updates(self, manual: bool = False) -> None:
+        if not manual:                       # keep the 30-minute cadence even if this tick overlaps a running check
+            self.after(30 * 60 * 1000, lambda: self.cfg["check_for_updates"] and self._check_updates())
+        self._update_manual = manual or self._update_manual
+        if self._update_busy:
+            return
+        self._update_busy = True
+
+        def work():
+            try:
+                if getattr(self, "updater", None) is None:
+                    self.updater = AutoUpdater()
+                self._upd_q.put(("checked", self.updater.check()))
+            except Exception as exc:          # never let the checker disturb the IDE
+                self._upd_q.put(("checked", None))
+                self._upd_q.put(("error", str(exc)))
+        threading.Thread(target=work, daemon=True, name="veriflow-update-check").start()
+        self.after(300, self._poll_updates)
+
+    def check_updates_now(self) -> None:
+        self._update_dismissed = ""
+        self._check_updates(manual=True)
+
+    def _poll_updates(self) -> None:
+        again = True
+        while True:
+            try:
+                kind, data = self._upd_q.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "checked":
+                self._update_busy, again = False, False
+                if data is not None:
+                    self._show_update(data)
+                elif self._update_manual:
+                    self.toast(f"✔ {APP_NAME} {APP_VERSION} is up to date.", "ok")
+                self._update_manual = False
+            elif kind == "progress" and self._update_notice is not None:
+                self._update_notice.set_status(data)
+            elif kind == "installed":
+                self._finish_update(data)
+                again = False
+            elif kind == "failed":
+                self._update_busy, again = False, False
+                self.log(f"Update failed: {data}", "err")
+                if self._update_notice is not None:
+                    self._update_notice.set_status(f"Update failed: {data}")
+                    self._update_notice.update_btn.configure(state="normal")
+            elif kind == "error":
+                self.log(f"Update check: {data}", "dim")
+        if again:
+            self.after(300, self._poll_updates)
+
+    def _show_update(self, info) -> None:
+        self._update_info = info
+        self.st_update.configure(text=f"🔔 Update v{info.version}")
+        self.st_update.grid()
+        if self._update_dismissed != info.version:
+            self._reopen_update_notice()
+
+    def _reopen_update_notice(self) -> None:
+        info = self._update_info
+        if info is None:
+            return
+        if self._update_notice is not None and self._update_notice.winfo_exists():
+            self._update_notice.destroy()
+        n = UpdateNotice(self, info, self.updater.can_self_update(info), self._apply_update,
+                         lambda: webbrowser.open(info.page_url), self._later_update)
+        n.place(relx=1.0, rely=1.0, anchor="se", x=-18, y=-int(34 * self.sc))
+        n.lift()
+        self._update_notice = n
+
+    def _later_update(self) -> None:
+        if self._update_info is not None:
+            self._update_dismissed = self._update_info.version
+        if self._update_notice is not None:
+            self._update_notice.destroy()
+            self._update_notice = None
+
+    def _apply_update(self) -> None:
+        info = self._update_info
+        if info is None or self._update_busy:
+            return
+        if not self.updater.can_self_update(info):          # exe without a matching release asset yet
+            webbrowser.open(info.page_url)
+            return
+        if not self._confirm_discard():
+            return
+        self._update_busy = True
+        self._update_notice.update_btn.configure(state="disabled")
+        self._update_notice.set_status("Downloading the update…" if is_frozen() else "Updating the source checkout…")
+        q = self._upd_q
+
+        def work():
+            try:
+                if is_frozen():
+                    self.updater.update_frozen(info, progress=lambda n: q.put(("progress", f"Downloading… {n / 1e6:.1f} MB")))
+                    q.put(("installed", "exe"))
+                else:
+                    lines: list[str] = []
+                    ok = self.updater.update_source(log=lines.append)
+                    q.put(("installed", "source") if ok else ("failed", " ".join(lines)[-300:] or "git pull failed"))
+            except Exception as exc:
+                q.put(("failed", str(exc)))
+        threading.Thread(target=work, daemon=True, name="veriflow-self-update").start()
+        self.after(300, self._poll_updates)
+
+    def _finish_update(self, how: str) -> None:
+        self.log(f"✔ Updated to v{self._update_info.version} - restarting…", "ok")
+        self.runner.stop()
+        if self.state() == "normal":
+            self.cfg.update(window_geometry=self.geometry())
+        if how == "source":
+            try:
+                subprocess.Popen(AutoUpdater.restart_command(), cwd=str(app_dir()), creationflags=0)
+            except OSError as exc:
+                messagebox.showinfo(APP_NAME, f"Updated. Please start {APP_NAME} again.\n({exc})", parent=self)
+        self.destroy()                      # the frozen helper waits for this process, swaps the .exe and relaunches
 
     def open_in_npp(self) -> None:
         if not self.module or not self.work_dir:
@@ -2280,7 +2523,7 @@ class VeriFlowApp(ctk.CTk):
         if code == 79 or ks == "o":
             self.choose_folder()
         elif code == 78 or ks == "n":
-            self.new_module()
+            self.new_project() if e.state & 0x1 else self.new_module()
         elif code == 66 or ks == "b":
             self.toggle_sidebar()
         elif code == 83 or ks == "s":

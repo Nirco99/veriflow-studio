@@ -63,6 +63,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "auto_resolve_packages_with_l_flag": True,
     "live_check_on_save": True,          # background `iverilog -tnull` after every save
+    # --- startup & updates
+    "startup_mode": "welcome_screen",    # welcome_screen | reopen_last | empty_window
+    "last_parent_dir": "",               # where the New Module / Project wizard saved last time
+    "check_for_updates": True,           # GitHub release + main/version.json, on startup and every 30 min
 }
 BUILTIN_PACKAGE_NAME = "Course Built-in Library (compstruct\\lib)"
 
@@ -77,7 +81,10 @@ CHOICES: dict[str, tuple] = {
     "std_flag": ("-g2012", "-g2005-sv", "-g2005", "-g2001"),
     "default_radix": ("Binary", "Hex", "Unsigned Dec", "Signed Dec"),
     "sidebar_view": ("explorer", "library", "run"),
+    "startup_mode": ("welcome_screen", "reopen_last", "empty_window"),
 }
+STARTUP_LABELS = {"welcome_screen": "Show the Welcome screen", "reopen_last": "Reopen the last folder",
+                  "empty_window": "Empty window"}
 RANGES: dict[str, tuple[float, float]] = {
     "editor_font_size": (10, 32),
     "console_font_size": (10, 28),
@@ -346,7 +353,7 @@ class ConfigManager:
         self._listeners.append(callback)
 
     def reset(self, keys: list[str] | None = None) -> set[str]:
-        keep = {"last_workspace_dir", "recent_workspaces", "last_module", "window_geometry",
+        keep = {"last_workspace_dir", "recent_workspaces", "last_module", "window_geometry", "last_parent_dir",
                 "library_packages", "global_packages_dir"}      # a settings reset never forgets imported packages
         keys = keys or [k for k in DEFAULT_CONFIG if k not in keep]
         return self.update(**{k: copy.deepcopy(DEFAULT_CONFIG[k]) for k in keys})

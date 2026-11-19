@@ -324,10 +324,54 @@ dumps are left in place (delete them manually if your course asks you to).
   resets everything to the defaults.
 * **UI & text size preset** (Settings → Appearance & Font): `Compact (12pt)`, `Comfortable (14-15pt)`,
   `Large / High-Visibility (17pt)`, `Extra Large (20pt)` – or set the three sizes individually (shown as `Custom`).
-* Readable **dark context menus** everywhere (editor right-click, snippets, module menu) at the UI font size, with
-  VS Code colours instead of tiny native menus.
+* Readable **dark context menus** everywhere (editor right-click, snippets submenu, module menu): borderless
+  `#252526` popups with Segoe UI at the UI font size, 32 px rows with a `#04395E` hover, right-aligned shortcuts,
+  side-opening submenus, keyboard navigation; they close on `Escape`, a click elsewhere or when the app loses focus.
 * The toolbar is **responsive**: when the window is too narrow for the full labels, buttons collapse to their icons
   (📂 🔍 🧪 💾 ⚡ 📦 📝 🧹) and show a tooltip on hover; the labels come back as soon as there is room.
+
+#### 🏠 Welcome / Get Started page & New Module / Project wizard
+
+* On launch VeriFlow opens a VS Code style **Welcome page** in the editor area instead of jumping into a folder:
+  * **Start** – `📄 New Verilog Module / File… (Ctrl+N)`, `📁 Create New Assignment / Project Folder… (Ctrl+Shift+N)`,
+    `📂 Open Existing Folder… (Ctrl+O)`, `📄 Open Single .v File…` (opens its folder and selects that module),
+    `📦 Import Lecturer Modules / Package…` and `🧪 Open Built-in Sample Project (FullAdder)`.
+  * **Recent** – up to 8 recent folders (name + full path, missing folders greyed out); click to open, `×` to remove,
+    `Clear Recent` to empty the list.
+  * `☑ Show Welcome screen on startup` at the bottom. Come back any time with `🏠 Welcome` (toolbar / activity bar) or
+    `✕` **Close Folder** in the Explorer header.
+* **Startup mode** (Settings → Editor Behavior → *On startup*): `Show the Welcome screen` (default), `Reopen the last
+  folder`, or `Empty window`.
+* **New Module / Project wizard** (`Ctrl+N` / `Ctrl+Shift+N` / Explorer `+`):
+  * module name (live preview of `<Module>.v` + `<Module>_tb.v` and the target path),
+  * **where to save** – defaults to the open workspace (or the last parent folder / `Documents`), `📂 Browse Folder…`,
+    plus a *create subfolder* / *new folder name* field (e.g. `Documents\CompStruct` + `Lab4`),
+  * optional **ports** – inputs `a, b, cin` or `[15:0] a, [15:0] b`, outputs `sum, cout` or `[15:0] y` (the width
+    goes before each bus name); empty = the classic NAND starter template,
+  * **testbench** – `Exhaustive Truth-Table TB`, `Empty Skeleton TB` or `No TB yet`,
+  * `☐ Also open the new file(s) in Notepad++`.
+  * `✨ Create & Open Module` creates the folder, writes the files, switches the workspace to it and opens both files
+    in the split editor.
+
+#### 🔔 Automatic updates from GitHub (notification + 1-click update)
+
+* `updater.py` (standard library only) checks **two sources** ~1.5 s after start and every 30 minutes, in the background
+  with a 4 s timeout (offline = silent):
+  1. the latest **GitHub Release** (`api.github.com/repos/<owner>/<repo>/releases/latest`) – carries the `.exe`;
+  2. **`version.json` on `main`** (`raw.githubusercontent.com/<owner>/<repo>/main/version.json`) – so a push that bumps
+     it notifies everyone running from source.
+* The repository is read from `git config --get remote.origin.url` (fallback: `Nirco99/veriflow-studio`). If Python's
+  TLS cannot verify GitHub's certificate chain, Windows' own `curl.exe` (system certificate store) is used instead.
+* A newer version shows a VS Code notification card (bottom right) and a `🔔 Update vX.Y.Z` badge in the status bar:
+  `↓ Update & Restart Now` · `View Changes` · `Later`.
+  * **From source**: `git pull --rebase --autostash origin main` (or `main.zip` when there is no `.git` folder), then
+    VeriFlow restarts itself.
+  * **`.exe`**: downloads the release `.exe` as `<name>_new.exe`, starts a small detached helper that waits for the app
+    to close, swaps the file and relaunches. If `main` is newer than the latest release (no `.exe` yet), the button
+    opens the download page instead.
+* Turn it off or check manually in Settings → Editor Behavior (`Check GitHub for updates`, `🔔 Check for Updates Now`).
+* **Publishing an update** (maintainers): bump `APP_VERSION` in `config_manager.py` and `version.json`, push to `main`;
+  for `.exe` users also publish a GitHub Release `vX.Y.Z` with `VeriFlowStudio.exe` attached.
 
 #### 🧩 Demo mode (no Icarus Verilog installed)
 
@@ -377,10 +421,12 @@ classmates. On first launch the bundled demo is copied to `Documents\VeriFlow St
 
 ### Step-by-step usage guide
 
-1. **Open an assignment folder** – `📂 Open…` (or `Ctrl+O`), or pick one from `Recent ▾`. The Explorer lists every
-   module and whether its testbench exists.
+1. **Open or create an assignment folder** – from the Welcome page, `📂 Open…` (`Ctrl+O`), `Recent ▾`, or
+   `Ctrl+Shift+N` to create a new folder with its first module. The Explorer lists every module and whether its
+   testbench exists.
 2. **Select or create a module** – click it in the Explorer or use the `Module:` dropdown. `+ New .v` (`Ctrl+N`)
-   creates `<Name>.v` from a template (the file name always equals the module name, as `-y` requires).
+   opens the wizard: name, folder, optional ports and testbench (the file name always equals the module name, as `-y`
+   requires).
 3. **Use lecturer modules** – load them once with `📦 Packages` (`+ .v Files`, `+ Folder` or `+ .zip`), then open the
    **📚 Library & Packages** view, search, select a module and click `⤵ Insert at Cursor`.
 4. **Create the testbench** – `🧪 Gen _tb.v` (also offered in the testbench tab when it is missing), then adjust it.
@@ -421,6 +467,8 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | | Auto-close brackets & `begin`/`end` | `auto_close_brackets_and_blocks` | on |
 | | Auto-save before Run (F5) | `auto_save_before_run` | on |
 | | Auto-save on focus loss | `auto_save_on_focus_loss` | off |
+| | On startup | `startup_mode` | `welcome_screen` (default), `reopen_last`, `empty_window` |
+| | Check GitHub for updates | `check_for_updates` | on (startup + every 30 min); `🔔 Check for Updates Now` button |
 | Compiler & Toolchain | iverilog.exe / vvp.exe / gtkwave.exe | `iverilog_path`, `vvp_path`, `gtkwave_path` | `C:\iverilog\bin\…`, `C:\iverilog\gtkwave\bin\gtkwave.exe` |
 | | Lecturer library (`-y`) | `lib_dir` | `C:\iverilog\compstruct\lib` |
 | | notepad++.exe | `notepad_pp_path` | `C:\Program Files\Notepad++\notepad++.exe` |
@@ -451,7 +499,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | `F7` | Run the static course linter only |
 | `Ctrl+S` | Save the active file (in the editor) / save all (elsewhere) |
 | `Ctrl+B` | Toggle the side bar (Explorer / Library / Run) |
-| `Ctrl+O` / `Ctrl+N` | Open folder / new module |
+| `Ctrl+O` / `Ctrl+N` / `Ctrl+Shift+N` | Open folder / New Module wizard / New Assignment (project folder) wizard |
 | `Ctrl+,` | Settings |
 | `Ctrl+F` / `Ctrl+H` | Find / Find & Replace bar (`Enter`, `Shift+Enter`, `F3` = next/previous) |
 | `Ctrl+G` | Go to line |
@@ -476,6 +524,9 @@ veriflow-studio/
 │                        # testbench generator, VCD reader - pure functions, no GUI
 ├── config_manager.py    # Settings schema + validation + config.json persistence, VS Code colour tokens,
 │                        # editor colour schemes, toolchain auto-detection
+├── welcome.py           # Welcome / Get Started page, New Module & Project wizard, update notification card
+├── updater.py           # GitHub release + version.json update checker, git-pull / .exe self-updater (stdlib only)
+├── version.json         # {"version", "notes"} on main - bump it to notify users running from source
 ├── package_manager.py   # Global package vault: .v / folder / .zip import, enable/remove, -y / -l resolution,
 │                        # conflict-free cached copies of library files
 ├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
@@ -812,10 +863,51 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
   הכל לברירת המחדל.
 * **פריסט גודל ממשק וטקסט** (הגדרות ← Appearance & Font): `Compact (12pt)`, `Comfortable (14-15pt)`,
   `Large / High-Visibility (17pt)`, `Extra Large (20pt)` – או הגדרה ידנית של שלושת הגדלים (מוצג כ-`Custom`).
-* **תפריטי קליק-ימני כהים וקריאים** בכל מקום (עורך, סניפטים, תפריט המודול) בגודל הגופן של הממשק ובצבעי VS Code, במקום
-  תפריטי מערכת זעירים.
+* **תפריטי קליק-ימני כהים וקריאים** בכל מקום (עורך, תת-תפריט הסניפטים, תפריט המודול): חלונות `#252526` ללא מסגרת,
+  Segoe UI בגודל הגופן של הממשק, שורות של 32 פיקסלים עם הדגשת `#04395E`, קיצורי מקלדת מיושרים לימין, תתי-תפריטים
+  שנפתחים לצד וניווט במקלדת; נסגרים ב-`Escape`, בלחיצה במקום אחר או כשהחלון מאבד פוקוס.
 * סרגל הכלים **רספונסיבי**: כשהחלון צר מדי לתוויות המלאות, הכפתורים מתכווצים לאייקונים (📂 🔍 🧪 💾 ⚡ 📦 📝 🧹) ומציגים
   הסבר במעבר עכבר; התוויות חוזרות ברגע שיש מקום.
+
+#### 🏠 מסך פתיחה (Welcome) ואשף מודול / פרויקט חדש
+
+* בהפעלה VeriFlow פותח **מסך פתיחה** בסגנון VS Code באזור העורך, במקום לקפוץ ישר לתיקייה:
+  * **Start** – `📄 New Verilog Module / File… (Ctrl+N)`, `📁 Create New Assignment / Project Folder… (Ctrl+Shift+N)`,
+    `📂 Open Existing Folder… (Ctrl+O)`, `📄 Open Single .v File…` (פותח את התיקייה שלו ובוחר את המודול),
+    `📦 Import Lecturer Modules / Package…` ו-`🧪 Open Built-in Sample Project (FullAdder)`.
+  * **Recent** – עד 8 תיקיות אחרונות (שם + נתיב מלא, תיקייה שנמחקה מוצגת באפור); לחיצה פותחת, `×` מסיר,
+    `Clear Recent` מרוקן את הרשימה.
+  * בתחתית: `☑ Show Welcome screen on startup`. אפשר לחזור למסך בכל רגע עם `🏠 Welcome` (סרגל הכלים / סרגל
+    הפעילות) או עם `✕` **Close Folder** בכותרת הסייר.
+* **מצב הפעלה** (הגדרות ← Editor Behavior ← *On startup*): מסך פתיחה (ברירת מחדל), פתיחה מחדש של התיקייה האחרונה,
+  או חלון ריק.
+* **אשף מודול / פרויקט חדש** (`Ctrl+N` / `Ctrl+Shift+N` / `+` בסייר):
+  * שם המודול (תצוגה מקדימה חיה של `<Module>.v` + `<Module>_tb.v` ושל נתיב היעד),
+  * **איפה לשמור** – ברירת המחדל היא תיקיית העבודה הפתוחה (או תיקיית האב האחרונה / `Documents`), `📂 Browse Folder…`,
+    ושדה ליצירת תת-תיקייה / שם תיקייה חדשה (למשל `Documents\CompStruct` + `Lab4`),
+  * **פורטים** (רשות) – כניסות `a, b, cin` או `[15:0] a, [15:0] b`, יציאות `sum, cout` או `[15:0] y` (הרוחב נכתב לפני
+    כל שם של אפיק); ריק = תבנית ה-NAND הקלאסית,
+  * **טסטבנץ'** – `Exhaustive Truth-Table TB`, `Empty Skeleton TB` או `No TB yet`,
+  * `☐ Also open the new file(s) in Notepad++`.
+  * `✨ Create & Open Module` יוצר את התיקייה, כותב את הקבצים, עובר אליה כתיקיית עבודה ופותח את שני הקבצים בעורך המפוצל.
+
+#### 🔔 עדכונים אוטומטיים מ-GitHub (התראה + עדכון בלחיצה אחת)
+
+* `updater.py` (ספריית התקן בלבד) בודק **שני מקורות** כ-1.5 שניות אחרי ההפעלה ואז כל 30 דקות, ברקע ועם מגבלת זמן של
+  4 שניות (בלי אינטרנט = שקט):
+  1. ה-**GitHub Release** האחרון (`api.github.com/repos/<owner>/<repo>/releases/latest`) – כולל את קובץ ה-`.exe`;
+  2. **`version.json` בענף `main`** (`raw.githubusercontent.com/<owner>/<repo>/main/version.json`) – כך שדחיפה שמעלה
+     את הגרסה בקובץ מתריעה לכל מי שמריץ מקוד המקור.
+* שם המאגר נקרא מ-`git config --get remote.origin.url` (גיבוי: `Nirco99/veriflow-studio`). אם ה-TLS של Python לא מצליח
+  לאמת את שרשרת האישורים של GitHub, נעשה שימוש ב-`curl.exe` של Windows (מאגר האישורים של המערכת).
+* כשיש גרסה חדשה מופיע כרטיס התראה בסגנון VS Code (פינה ימנית-תחתונה) ותג `🔔 Update vX.Y.Z` בשורת המצב:
+  `↓ Update & Restart Now` · `View Changes` · `Later`.
+  * **מקוד מקור**: `git pull --rebase --autostash origin main` (או `main.zip` כשאין תיקיית `.git`), ואז VeriFlow מופעל מחדש.
+  * **`.exe`**: מוריד את ה-`.exe` מה-Release בשם `<name>_new.exe`, מפעיל עוזר קטן ומנותק שמחכה שהתוכנה תיסגר, מחליף
+    את הקובץ ומפעיל מחדש. אם `main` חדש יותר מה-Release האחרון (אין עדיין `.exe`), הכפתור פותח את דף ההורדה.
+* כיבוי או בדיקה ידנית: הגדרות ← Editor Behavior (`Check GitHub for updates`, `🔔 Check for Updates Now`).
+* **פרסום עדכון** (למתחזקים): מעלים את `APP_VERSION` ב-`config_manager.py` ואת `version.json`, דוחפים ל-`main`;
+  למשתמשי `.exe` מפרסמים גם GitHub Release ‏`vX.Y.Z` עם `VeriFlowStudio.exe` מצורף.
 
 #### 🧩 מצב הדגמה (כש-Icarus Verilog לא מותקן)
 
@@ -873,9 +965,10 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 
 ### מדריך שימוש צעד אחר צעד
 
-1. **פתיחת תיקיית תרגיל** – `📂 Open…` (או `Ctrl+O`), או בחירה מתוך `Recent ▾`. הסייר מציג כל מודול והאם יש לו טסטבנץ'.
-2. **בחירה או יצירה של מודול** – לחיצה בסייר או בחירה מהתפריט `Module:`. הכפתור `+ New .v` (`Ctrl+N`) יוצר
-   `<Name>.v` מתבנית (שם הקובץ תמיד זהה לשם המודול, כפי ש-`-y` דורש).
+1. **פתיחה או יצירה של תיקיית תרגיל** – ממסך הפתיחה, `📂 Open…` (`Ctrl+O`), `Recent ▾`, או `Ctrl+Shift+N` ליצירת
+   תיקייה חדשה עם המודול הראשון שלה. הסייר מציג כל מודול והאם יש לו טסטבנץ'.
+2. **בחירה או יצירה של מודול** – לחיצה בסייר או בחירה מהתפריט `Module:`. הכפתור `+ New .v` (`Ctrl+N`) פותח את האשף:
+   שם, תיקייה, פורטים וטסטבנץ' לפי בחירה (שם הקובץ תמיד זהה לשם המודול, כפי ש-`-y` דורש).
 3. **שימוש במודולים של המרצה** – טוענים אותם פעם אחת עם `📦 Packages` (`+ .v Files`, `+ Folder` או `+ .zip`), ואז
    פותחים את תצוגת **📚 Library & Packages**, מחפשים, בוחרים מודול ולוחצים `⤵ Insert at Cursor`.
 4. **יצירת הטסטבנץ'** – `🧪 Gen _tb.v` (מוצע גם בלשונית הטסטבנץ' כשהוא חסר), ואז מתאימים אותו.
@@ -915,6 +1008,8 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | | סגירה אוטומטית של סוגריים ו-`begin`/`end` | `auto_close_brackets_and_blocks` | פעיל |
 | | שמירה לפני הרצה (F5) | `auto_save_before_run` | פעיל |
 | | שמירה ביציאה מהחלון | `auto_save_on_focus_loss` | כבוי |
+| | בהפעלה | `startup_mode` | `welcome_screen` (ברירת מחדל), `reopen_last`, `empty_window` |
+| | בדיקת עדכונים ב-GitHub | `check_for_updates` | פעיל (בהפעלה וכל 30 דקות); כפתור `🔔 Check for Updates Now` |
 | Compiler & Toolchain | נתיבי iverilog.exe / vvp.exe / gtkwave.exe | `iverilog_path`, `vvp_path`, `gtkwave_path` | `C:\iverilog\bin\…`, `C:\iverilog\gtkwave\bin\gtkwave.exe` |
 | | ספריית המרצה (`-y`) | `lib_dir` | `C:\iverilog\compstruct\lib` |
 | | notepad++.exe | `notepad_pp_path` | `C:\Program Files\Notepad++\notepad++.exe` |
@@ -946,7 +1041,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | `F7` | הרצת ה-Linter בלבד |
 | `Ctrl+S` | שמירת הקובץ הפעיל (בעורך) / שמירת הכל (מחוץ לעורך) |
 | `Ctrl+B` | הצגה/הסתרה של סרגל הצד (Explorer / Library / Run) |
-| `Ctrl+O` / `Ctrl+N` | פתיחת תיקייה / מודול חדש |
+| `Ctrl+O` / `Ctrl+N` / `Ctrl+Shift+N` | פתיחת תיקייה / אשף מודול חדש / אשף תיקיית תרגיל חדשה |
 | `Ctrl+,` | הגדרות |
 | `Ctrl+F` / `Ctrl+H` | חיפוש / חיפוש והחלפה (`Enter`, `Shift+Enter`, `F3` = הבא/הקודם) |
 | `Ctrl+G` | מעבר לשורה |
@@ -968,6 +1063,9 @@ veriflow-studio/
 ├── verilog_runner.py    # iverilog -> vvp pipeline, timeout/process-tree kill, diagnostics & truth-table parsers
 ├── verilog_parser.py    # Module parser, course linter, testbench generator, VCD reader (no GUI)
 ├── config_manager.py    # Settings + config.json, VS Code colour tokens, toolchain auto-detection
+├── welcome.py           # Welcome page, New Module & Project wizard, update notification card
+├── updater.py           # GitHub update checker + 1-click self-updater (standard library only)
+├── version.json         # current version + notes on main (update notifications)
 ├── package_manager.py   # Global package vault, .v / folder / .zip import, -y / -l resolution
 ├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
 ├── requirements.txt
