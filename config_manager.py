@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 APP_NAME = "VeriFlow Studio"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 IS_WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -19,8 +19,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "editor_color_scheme": "Dark Modern",
     "ui_scale_percent": 100,
     "editor_font_family": "Consolas",
-    "editor_font_size": 13,
-    "console_font_size": 12,
+    "editor_font_size": 15,
+    "console_font_size": 13,
+    "ui_font_size": 13,                 # UI chrome: toolbar, tabs, sidebar, menus, tables, status bar, diagrams
     "tab_size": 4,
     "insert_spaces_for_tabs": True,
     "word_wrap": False,
@@ -78,12 +79,21 @@ CHOICES: dict[str, tuple] = {
     "sidebar_view": ("explorer", "library", "run"),
 }
 RANGES: dict[str, tuple[float, float]] = {
-    "editor_font_size": (8, 28),
-    "console_font_size": (8, 24),
+    "editor_font_size": (10, 32),
+    "console_font_size": (10, 28),
+    "ui_font_size": (10, 24),
     "sim_timeout_sec": (1.0, 30.0),
     "external_poll_interval_ms": (500, 3000),
 }
 FONT_FAMILIES = ("Consolas", "Cascadia Code", "JetBrains Mono", "Courier New", "Lucida Console")
+UI_FAMILY, MONO_FAMILY = "Segoe UI", "Consolas"
+# "UI & Text Size" presets: (ui_font_size, editor_font_size, console_font_size)
+TEXT_SIZE_PRESETS = {
+    "Compact (12pt)": (12, 13, 12),
+    "Comfortable (14-15pt)": (13, 15, 13),
+    "Large / High-Visibility (17pt)": (15, 17, 15),
+    "Extra Large (20pt)": (18, 20, 18),
+}
 RADIXES = CHOICES["default_radix"]
 
 # --------------------------------------------------------------------------- VS Code workbench chrome
@@ -92,7 +102,7 @@ VSCODE_THEMES: dict[str, dict[str, str]] = {
         "activity": "#181818", "activity_fg": "#858585", "activity_active": "#FFFFFF", "accent": "#007ACC",
         "sidebar": "#181818", "sidebar_header": "#CCCCCC", "hover": "#2A2D2E", "selected": "#04395E", "selected_fg": "#FFFFFF",
         "toolbar": "#181818", "border": "#2B2B2B", "editor": "#1E1E1E", "tabstrip": "#181818", "tab_active": "#1E1E1E",
-        "tab_active_fg": "#FFFFFF", "tab_inactive": "#2D2D2D", "tab_inactive_fg": "#969696", "breadcrumb_fg": "#A9A9A9",
+        "tab_active_fg": "#FFFFFF", "tab_inactive": "#2D2D2D", "tab_inactive_fg": "#969696", "breadcrumb_fg": "#BBBBBB",
         "panel": "#181818", "panel_content": "#1E1E1E", "text": "#CCCCCC", "muted": "#858585", "group": "#252526",
         "group_border": "#3C3C3C", "input": "#313131", "input_border": "#3C3C3C", "badge": "#4D4D4D", "badge_fg": "#FFFFFF",
         "scroll_thumb": "#424242", "scroll_hover": "#4F4F4F", "table_head": "#252526", "table_row": "#1E1E1E",
@@ -102,7 +112,7 @@ VSCODE_THEMES: dict[str, dict[str, str]] = {
         "activity": "#F8F8F8", "activity_fg": "#616161", "activity_active": "#1F1F1F", "accent": "#005FB8",
         "sidebar": "#F8F8F8", "sidebar_header": "#3B3B3B", "hover": "#F2F2F2", "selected": "#E4E6F1", "selected_fg": "#000000",
         "toolbar": "#F8F8F8", "border": "#E5E5E5", "editor": "#FFFFFF", "tabstrip": "#F8F8F8", "tab_active": "#FFFFFF",
-        "tab_active_fg": "#3B3B3B", "tab_inactive": "#F8F8F8", "tab_inactive_fg": "#868686", "breadcrumb_fg": "#616161",
+        "tab_active_fg": "#3B3B3B", "tab_inactive": "#F8F8F8", "tab_inactive_fg": "#868686", "breadcrumb_fg": "#4D4D4D",
         "panel": "#F8F8F8", "panel_content": "#FFFFFF", "text": "#3B3B3B", "muted": "#767676", "group": "#FFFFFF",
         "group_border": "#CECECE", "input": "#FFFFFF", "input_border": "#CECECE", "badge": "#CCCCCC", "badge_fg": "#1F1F1F",
         "scroll_thumb": "#C1C1C1", "scroll_hover": "#A8A8A8", "table_head": "#F3F3F3", "table_row": "#FFFFFF",
@@ -113,7 +123,7 @@ VSCODE_THEMES: dict[str, dict[str, str]] = {
 VS: dict[str, tuple[str, str]] = {k: (VSCODE_THEMES["Light"][k], VSCODE_THEMES["Dark"][k]) for k in VSCODE_THEMES["Dark"]}
 STATUS_COLORS = {"ready": "#007ACC", "running": "#CC6633", "error": "#A1260D"}
 RUN_GREEN, RUN_GREEN_HOVER, STOP_RED, STOP_RED_HOVER = "#2EA043", "#3FB950", "#C93C37", "#E5534B"
-UI_REVISION = 2      # bump to migrate stored settings after a visual redesign
+UI_REVISION = 3      # bump to migrate stored settings after a visual redesign (3 = comfortable typography)
 
 # --------------------------------------------------------------------------- editor colour schemes
 EDITOR_SCHEMES: dict[str, dict[str, str]] = {
@@ -230,7 +240,14 @@ class ConfigManager:
         if self.data["ui_revision"] < UI_REVISION:      # 1.0 -> VS Code look: move old default schemes to Dark+/Light+
             self.data["editor_color_scheme"] = {"One Dark": DARK_SCHEME, "GitHub Light": LIGHT_SCHEME}.get(
                 self.data["editor_color_scheme"], self.data["editor_color_scheme"])
+            # v1.4 comfortable typography (runs once): lift sizes saved under the old, too-small defaults
+            if self.data["editor_font_size"] < 14:
+                self.data["editor_font_size"] = 15
+            if self.data["console_font_size"] < 13:
+                self.data["console_font_size"] = 13
+            self.data["ui_font_size"] = max(self.data["ui_font_size"], 13)
             self.data["ui_revision"] = UI_REVISION
+            self.save()
         if not Path(self.data["iverilog_path"]).is_file():      # first run on a non-default install
             found = detect_toolchains()
             for k, v in found.items():

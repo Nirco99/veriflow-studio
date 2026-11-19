@@ -19,12 +19,13 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
-from config_manager import (ACCENT, APP_NAME, APP_VERSION, CHOICES, DARK_SCHEME, DEFAULT_CONFIG, EDITOR_SCHEMES,
+from config_manager import (TEXT_SIZE_PRESETS, ACCENT, APP_NAME, APP_VERSION, CHOICES, DARK_SCHEME, DEFAULT_CONFIG, EDITOR_SCHEMES,
                             FONT_FAMILIES, LIGHT_SCHEME, RADIXES, RUN_GREEN, RUN_GREEN_HOVER, STATUS_COLORS, STOP_RED,
                             STOP_RED_HOVER, VS, VSCODE_THEMES, ConfigManager, detect_toolchains, resource_dir)
 from ui_components import (SNIPPETS, ActivityBar, MiniWaveformViewer, PanelTabs, SideSection, TruthTableGrid,
                            VerilogCodeEditor, entry_style, ghost_button, hline, icon_button, is_dark, option_style,
-                           PinoutDiagram, seg_style, slim_scrollbar, style_treeview, ui_scale, vline)
+                           FontBook, PinoutDiagram, _Tooltip, seg_style, slim_scrollbar, style_menu, style_treeview, ui_font,
+                           ui_px, ui_scale, vline)
 from verilog_parser import (analyze_hierarchy, describe_ports, generate_testbench_skeleton, instantiation_template,
                             new_module_template,
                             parse_vcd_file, parse_verilog_module, run_course_linter, scan_module_dir)
@@ -56,7 +57,9 @@ def read_source(path: Path) -> tuple[str, str]:
 
 
 def font(size: int = 12, weight: str = "normal") -> ctk.CTkFont:
-    return ctk.CTkFont(size=size, weight=weight)
+    """UI font relative to the user's UI text size: 12 = the base size, 11 = one step smaller, 14 = two larger...
+    Fonts are shared FontBook objects, so A+/A-, Ctrl+wheel and the size presets re-flow the UI live."""
+    return ui_font(size - 12, weight)
 
 
 # =========================================================================== settings dialog
@@ -92,9 +95,14 @@ class SettingsDialog(ctk.CTkToplevel):
         self._option(t1, 3, "UI scaling", "ui_scale_percent", [f"{v}%" for v in CHOICES["ui_scale_percent"]],
                      to_cfg=lambda s: int(s.rstrip("%")), to_ui=lambda v: f"{v}%")
         self._option(t1, 4, "Editor font family", "editor_font_family", list(FONT_FAMILIES))
-        self._slider(t1, 5, "Editor font size", "editor_font_size", 8, 28, 20, "{:.0f} pt", int)
-        self._slider(t1, 6, "Console / table font size", "console_font_size", 8, 24, 16, "{:.0f} pt", int)
+        self._slider(t1, 5, "Editor font size", "editor_font_size", 10, 32, 22, "{:.0f} pt", int)
+        self._slider(t1, 6, "Console font size", "console_font_size", 10, 28, 18, "{:.0f} pt", int)
         self._option(t1, 7, "Default radix", "default_radix", list(RADIXES))
+        self._label(t1, 8, "UI & text size preset")
+        self.preset_var = tk.StringVar(value=self._preset_name())
+        ctk.CTkOptionMenu(t1, values=list(TEXT_SIZE_PRESETS) + ["Custom"], variable=self.preset_var, width=260,
+                          command=self._apply_preset, **option_style()).grid(row=8, column=1, sticky="w", pady=5)
+        self._slider(t1, 9, "UI font size (menus, tabs, tables, sidebar)", "ui_font_size", 10, 24, 14, "{:.0f} pt", int)
 
         self._option(t2, 0, "Editor layout", "editor_split_layout", list(LAYOUT_LABELS.values()),
                      to_cfg=lambda s: next(k for k, v in LAYOUT_LABELS.items() if v == s), to_ui=lambda v: LAYOUT_LABELS[v])
@@ -226,7 +234,18 @@ class SettingsDialog(ctk.CTkToplevel):
             self.cfg.reset()
             self.sync_from_config()
 
+    def _preset_name(self) -> str:
+        cur = (self.cfg["ui_font_size"], self.cfg["editor_font_size"], self.cfg["console_font_size"])
+        return next((n for n, v in TEXT_SIZE_PRESETS.items() if v == cur), "Custom")
+
+    def _apply_preset(self, name: str) -> None:
+        if name in TEXT_SIZE_PRESETS:
+            ui, ed, con = TEXT_SIZE_PRESETS[name]
+            self.cfg.update(ui_font_size=ui, editor_font_size=ed, console_font_size=con)
+
     def sync_from_config(self) -> None:
+        if hasattr(self, "preset_var"):
+            self.preset_var.set(self._preset_name())
         for key, var in self.vars.items():
             v = self.cfg[key]
             if isinstance(var, tk.BooleanVar):
@@ -346,8 +365,8 @@ class SelfCheckDialog(ctk.CTkToplevel):
             if p["direction"] == "input":
                 continue
             ctk.CTkLabel(self, text=f"{p['name']}{p['range_text']} =", anchor="e", text_color=VS["text"],
-                         font=("Consolas", 13)).grid(row=r, column=0, sticky="e", padx=(16, 8), pady=4)
-            e = ctk.CTkEntry(self, height=28, font=("Consolas", 13), **entry_style())
+                         font=ui_font(1, family="Consolas")).grid(row=r, column=0, sticky="e", padx=(16, 8), pady=4)
+            e = ctk.CTkEntry(self, height=30, font=ui_font(1, family="Consolas"), **entry_style())
             e.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=4)
             self.entries[p["name"]] = e
             r += 1
@@ -427,6 +446,8 @@ class VeriFlowApp(ctk.CTk):
         self.sidebar_visible = bool(self.cfg["sidebar_visible"])
         self.style = ttk.Style(self)
         self.sc = ui_scale(self)
+        FontBook.set_base(self.cfg["ui_font_size"])           # every ui_font() created from here on starts at this size
+        self.option_add("*Menu.font", ("Segoe UI", -ui_px(self, -1)))     # no tiny native menus anywhere
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
@@ -442,8 +463,47 @@ class VeriFlowApp(ctk.CTk):
         self.after(120, self._startup)
 
     # ================================================================== Zone 1: title / action bar
+    def _tb(self, widget, full: str, short: str, tip: str):
+        """Register a toolbar control that collapses to its icon (with a hover tooltip) when the bar is too narrow."""
+        self._tb_items.append((widget, full, short, tip))
+        widget.bind("<Enter>", lambda e, t=tip: self._tb_tip.show(t, e.x_root, e.y_root) if self._tb_compact else None, add="+")
+        widget.bind("<Leave>", lambda e: self._tb_tip.hide(), add="+")
+        return widget
+
+    def _set_toolbar_compact(self, compact: bool) -> None:
+        self._tb_compact = compact
+        self._tb_tip.hide()
+        for w, full, short, _tip in self._tb_items:
+            w.configure(text=short if compact else full)
+        self.recent_menu.configure(width=86 if compact else 96)
+        self.snippet_menu.configure(width=80 if compact else 100)
+
+    def _schedule_fit_toolbar(self, reset: bool = False) -> None:
+        if reset:                                   # fonts changed: re-measure from the full labels
+            self._tb_full_need = 0
+            if self._tb_compact:
+                self._set_toolbar_compact(False)
+        if not self._tb_fit_pending:
+            self._tb_fit_pending = True
+            self.after_idle(self._fit_toolbar)
+
+    def _fit_toolbar(self) -> None:
+        self._tb_fit_pending = False
+        avail = self.titlebar.winfo_width()
+        if avail <= 1:
+            return
+        need = sum(f.winfo_reqwidth() for f in self._tb_frames) + int(36 * self.sc)
+        if not self._tb_compact and need > avail:
+            self._tb_full_need = need
+            self._set_toolbar_compact(True)
+        elif self._tb_compact and self._tb_full_need and avail >= self._tb_full_need:
+            self._set_toolbar_compact(False)
+
     def _build_titlebar(self) -> None:
-        bar = ctk.CTkFrame(self, height=40, corner_radius=0, fg_color=VS["toolbar"])
+        self._tb_items, self._tb_compact, self._tb_full_need, self._tb_fit_pending = [], False, 0, False
+        self._tb_tip = _Tooltip(self)
+        bar = ctk.CTkFrame(self, height=int(40 * FontBook.base / 13), corner_radius=0, fg_color=VS["toolbar"])
+        self.titlebar = bar
         bar.grid(row=0, column=0, sticky="ew")
         bar.grid_propagate(False)
         bar.grid_rowconfigure(0, weight=1)
@@ -452,14 +512,17 @@ class VeriFlowApp(ctk.CTk):
 
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.grid(row=0, column=0, padx=(8, 0))
-        ghost_button(left, "📂 Open…", self.choose_folder, height=26).pack(side="left", padx=(0, 4))
+        self._tb(ghost_button(left, "📂 Open…", self.choose_folder, height=26), "📂 Open…", "📂",
+                 "Open a workspace folder").pack(side="left", padx=(0, 4))
         self.recent_menu = ctk.CTkOptionMenu(left, values=[RECENT_LABEL], width=96, command=self._open_recent, **option_style())
         self.recent_menu.set(RECENT_LABEL)
         self.recent_menu.pack(side="left", padx=(0, 10))
-        ctk.CTkLabel(left, text="Module:", text_color=VS["muted"], font=font(12)).pack(side="left", padx=(0, 4))
+        self._tb(ctk.CTkLabel(left, text="Module:", text_color=VS["muted"], font=font(12)), "Module:", "",
+                 "Active module").pack(side="left", padx=(0, 4))
         self.module_menu = ctk.CTkOptionMenu(left, values=["(no modules)"], width=124, command=self._module_selected, **option_style())
         self.module_menu.pack(side="left", padx=(0, 4))
-        ghost_button(left, "+ New .v", self.new_module, height=26).pack(side="left")
+        self._tb(ghost_button(left, "+ New .v", self.new_module, height=26), "+ New .v", "+",
+                 "New Verilog module").pack(side="left")
         vline(bar).grid(row=0, column=1, sticky="ns", padx=10, pady=9)
 
         group = ctk.CTkFrame(bar, corner_radius=3, fg_color=VS["group"], border_width=1, border_color=VS["group_border"])
@@ -472,21 +535,25 @@ class VeriFlowApp(ctk.CTk):
                                       hover_color=STOP_RED_HOVER, text_color=WHITE, text_color_disabled=("#8A8A8A", "#8A8A8A"),
                                       font=font(12), state="disabled", command=self.stop_run)
         self.stop_btn.pack(side="left", padx=2, pady=3)
-        for text, cmd in (("🔍 Lint (F7)", lambda: self.run_lint(show=True)), ("🧪 Gen _tb.v", self.generate_tb),
-                          ("💾 Save All", self.save_all)):
+        for text, cmd, tip in (("🔍 Lint (F7)", lambda: self.run_lint(show=True), "Lint (F7)"),
+                               ("🧪 Gen _tb.v", self.generate_tb, "Generate a _tb.v testbench"),
+                               ("💾 Save All", self.save_all, "Save all (Ctrl+S)")):
             vline(group).pack(side="left", fill="y", pady=6)
-            icon_button(group, text, cmd, width=0, height=26, font=font(12)).pack(side="left", padx=2, pady=3)
+            self._tb(icon_button(group, text, cmd, width=0, height=26, font=font(12)), text, text.split()[0],
+                     tip).pack(side="left", padx=2, pady=3)
         vline(group).pack(side="left", fill="y", pady=6)
         self.sync_switch = ctk.CTkSwitch(group, text="⚡ N++ Sync", switch_width=30, switch_height=15, progress_color=VS["accent"],
                                          text_color=VS["text"], font=font(12),
                                          command=lambda: self.cfg.update(live_sync_enabled=bool(self.sync_switch.get())))
+        self._tb(self.sync_switch, "⚡ N++ Sync", "⚡", "Notepad++ live sync")
         self.sync_switch.pack(side="left", padx=(8, 6), pady=3)
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.grid(row=0, column=4, padx=(0, 8))
-        icon_button(right, "📦 Packages", self.open_package_manager, width=0, font=font(12)).pack(side="left", padx=1)
-        icon_button(right, "📝 N++", self.open_in_npp, width=0, font=font(12)).pack(side="left", padx=1)
-        icon_button(right, "🧹 Clean", self.clean, width=0, font=font(12)).pack(side="left", padx=1)
+        for text, cmd, tip in (("📦 Packages", self.open_package_manager, "Package & library manager"),
+                               ("📝 N++", self.open_in_npp, "Open in Notepad++"),
+                               ("🧹 Clean", self.clean, "Clean build outputs")):
+            self._tb(icon_button(right, text, cmd, width=0, font=font(12)), text, text.split()[0], tip).pack(side="left", padx=1)
         self.snippet_menu = ctk.CTkOptionMenu(right, values=list(SNIPPETS), width=100, command=self._insert_snippet, **option_style())
         self.snippet_menu.set(SNIPPET_LABEL)
         self.snippet_menu.pack(side="left", padx=(4, 6))
@@ -499,6 +566,9 @@ class VeriFlowApp(ctk.CTk):
         self.theme_btn = icon_button(right, "☀", self.toggle_theme, width=32, font=font(15))
         self.theme_btn.pack(side="left", padx=1)
         icon_button(right, "⚙", self.open_settings, width=32, font=font(15)).pack(side="left", padx=1)
+        self._tb_frames = (left, group, right)
+        for w in (bar, left, group, right):          # bar resized, or a control's text/width changed
+            w.bind("<Configure>", lambda e: self._schedule_fit_toolbar(), add="+")
 
     def _build_banner(self) -> None:
         self.banner = ctk.CTkFrame(self, corner_radius=0, height=30, fg_color=("#FFF4CE", "#3D3313"))
@@ -559,7 +629,7 @@ class VeriFlowApp(ctk.CTk):
         head.grid_propagate(False)
         head.grid_columnconfigure(0, weight=1)
         head.grid_rowconfigure(0, weight=1)
-        lab = ctk.CTkLabel(head, text=title, anchor="w", text_color=VS["sidebar_header"], font=font(11))
+        lab = ctk.CTkLabel(head, text=title, anchor="w", text_color=VS["sidebar_header"], font=font(11, "bold"))
         lab.grid(row=0, column=0, sticky="ew", padx=(14, 4))
         for c, (icon, cmd) in enumerate(actions, start=1):
             icon_button(head, icon, cmd, width=24, height=22, font=font(14)).grid(row=0, column=c, padx=1)
@@ -587,7 +657,7 @@ class VeriFlowApp(ctk.CTk):
         self.sec_modules.body.grid_rowconfigure(0, weight=1)
         self.mod_list = self._scroll_list(self.sec_modules.body)
         self.mod_list.grid(row=0, column=0, sticky="nsew")
-        self.sec_extra = SideSection(v, "EXTRA .V FILES (COMPILE OVERRIDES)", on_toggle=toggled)
+        self.sec_extra = SideSection(v, "EXTRA .V FILES", on_toggle=toggled)
         self.sec_extra.grid(row=2, column=0, sticky="nsew")
         self.sec_extra.body.grid_rowconfigure(0, weight=1)
         self.extra_list = self._scroll_list(self.sec_extra.body, height=110)
@@ -622,7 +692,7 @@ class VeriFlowApp(ctk.CTk):
         self.lib_list = self._scroll_list(v)
         self.lib_list.grid(row=4, column=0, sticky="nsew")
         hline(v).grid(row=5, column=0, sticky="ew")
-        self.lib_detail = ctk.CTkTextbox(v, height=150, font=("Consolas", 11), wrap="none", corner_radius=0, border_width=0,
+        self.lib_detail = ctk.CTkTextbox(v, height=150, font=ui_font(-1, family="Consolas"), wrap="none", corner_radius=0, border_width=0,
                                          fg_color=VS["editor"], text_color=VS["text"])
         self.lib_detail.grid(row=6, column=0, sticky="nsew")
         btns = ctk.CTkFrame(v, fg_color="transparent")
@@ -667,7 +737,7 @@ class VeriFlowApp(ctk.CTk):
         ctk.CTkLabel(v, text="COMMAND LINE", anchor="w", text_color=VS["sidebar_header"], font=font(11, "bold")).grid(
             row=row + 1, column=0, sticky="ew", padx=14)
         self.run_cmd_box = ctk.CTkTextbox(v, height=130, wrap="char", corner_radius=0, border_width=1, border_color=VS["border"],
-                                          fg_color=VS["editor"], text_color=VS["text"], font=("Consolas", 11))
+                                          fg_color=VS["editor"], text_color=VS["text"], font=ui_font(-1, family="Consolas"))
         self.run_cmd_box.grid(row=row + 2, column=0, sticky="nsew", padx=12, pady=(2, 8))
         v.grid_rowconfigure(row + 2, weight=1)
         btns = ctk.CTkFrame(v, fg_color="transparent")
@@ -690,7 +760,7 @@ class VeriFlowApp(ctk.CTk):
         r.grid_rowconfigure(0, weight=1)
         ctk.CTkLabel(r, text="CMD:", text_color=VS["muted"], font=font(11, "bold")).grid(row=0, column=0, padx=(0, 6))
         self.cmd_var = tk.StringVar(value="Open a workspace to see the exact iverilog / vvp command line")
-        self.cmd_entry = ctk.CTkEntry(r, textvariable=self.cmd_var, font=("Consolas", 11), height=22, state="readonly", **entry_style())
+        self.cmd_entry = ctk.CTkEntry(r, textvariable=self.cmd_var, font=ui_font(-1, family="Consolas"), height=26, state="readonly", **entry_style())
         self.cmd_entry.grid(row=0, column=1, sticky="ew")
         self.cmd_seg = ctk.CTkSegmentedButton(r, values=["Actual", "Baseline"], command=self._cmd_mode, **{**seg_style(), "height": 22})
         self.cmd_seg.set("Actual")
@@ -753,13 +823,13 @@ class VeriFlowApp(ctk.CTk):
     def _build_statusbar(self) -> None:
         # plain tk widgets: one solid colour band that recolours instantly (blue / orange / red)
         color = STATUS_COLORS["ready"]
-        sb = tk.Frame(self, bg=color, height=int(22 * self.sc), bd=0, highlightthickness=0)
+        sb = tk.Frame(self, bg=color, height=int(26 * self.sc * FontBook.base / 13), bd=0, highlightthickness=0)
         sb.grid(row=4, column=0, sticky="ew")
         sb.grid_propagate(False)
         sb.grid_rowconfigure(0, weight=1)
         self.statusbar = sb
         self._st_labels: list[tk.Label] = []
-        st_font = ("Segoe UI", -max(9, round(12 * self.sc)))
+        st_font = ("Segoe UI", -ui_px(self, -1))
 
         def item(col, text="", click=None, weight=0):
             lab = tk.Label(sb, text=text, bg=color, fg=WHITE, font=st_font, bd=0, padx=int(6 * self.sc),
@@ -806,7 +876,7 @@ class VeriFlowApp(ctk.CTk):
         self.st_sync.configure(text=f"⇄ N++ Sync: {'ON' if c['live_sync_enabled'] else 'OFF'}")
         self.st_module.configure(text=f"Module: {self.module or '-'}")
         self.st_spaces.configure(text=f"Spaces: {c['tab_size']}" if c["insert_spaces_for_tabs"] else f"Tab Size: {c['tab_size']}")
-        self.st_font.configure(text=f"Font: {c['editor_font_size']}pt")
+        self.st_font.configure(text=f"Font: {c['editor_font_size']}pt · UI {c['ui_font_size']}pt")
         std = c["std_flag"]
         self.st_std.configure(text=f"{'SystemVerilog' if 'sv' in std or '2012' in std else 'Verilog'} ({std})")
         self.st_tool.configure(text=self._tool_text)
@@ -854,6 +924,13 @@ class VeriFlowApp(ctk.CTk):
         self.hpane.configure(bg=th["border"])
         self.vpane.configure(bg=th["border"])
         style_treeview(self.style, self.cfg, ui_scale(self))
+        FontBook.set_base(self.cfg["ui_font_size"])
+        self.option_add("*Menu.font", ("Segoe UI", -ui_px(self, -1)))
+        self.statusbar.configure(height=int(26 * self.sc * FontBook.base / 13))
+        self.titlebar.configure(height=int(40 * FontBook.base / 13))
+        self._schedule_fit_toolbar(reset=True)
+        for lab in self._st_labels:
+            lab.configure(font=("Segoe UI", -ui_px(self, -1)))
         for ed in (self.design_ed, self.tb_ed):
             ed.apply_editor_settings(self.cfg)
         self.console.configure(fg_color=sc["console_bg"], text_color=sc["console_fg"],
@@ -871,6 +948,8 @@ class VeriFlowApp(ctk.CTk):
         self.wave.apply_theme(self.cfg)
         self.theme_btn.configure(text="☀" if dark else "🌙")
         self.font_lbl.configure(text=f"{self.cfg['editor_font_size']}pt")
+        self.pinout.render()
+        self._render_module_list()
         self._refresh_siblings()
         self._refresh_status_items()
 
@@ -903,6 +982,7 @@ class VeriFlowApp(ctk.CTk):
                    "iverilog_path", "vvp_path", "lib_dir"}:
             self._update_cmd()
         visual = {"appearance_mode", "editor_color_scheme", "editor_font_family", "editor_font_size", "console_font_size",
+                  "ui_font_size",
                   "tab_size", "word_wrap", "highlight_current_line", "insert_spaces_for_tabs", "ui_scale_percent"}
         if keys & visual:
             self.after(30, self._apply_theme)
@@ -962,11 +1042,14 @@ class VeriFlowApp(ctk.CTk):
                             editor_color_scheme=DARK_SCHEME if scheme in (LIGHT_SCHEME, "GitHub Light") else scheme)
 
     def zoom(self, delta: int) -> None:
+        """A-/A+, Ctrl+wheel, Ctrl+Plus/Minus/0: editor, console AND the UI (tabs, menus, tables, diagrams) together."""
         if delta == 0:
-            self.cfg.update(editor_font_size=DEFAULT_CONFIG["editor_font_size"], console_font_size=DEFAULT_CONFIG["console_font_size"])
+            self.cfg.update(editor_font_size=DEFAULT_CONFIG["editor_font_size"], console_font_size=DEFAULT_CONFIG["console_font_size"],
+                            ui_font_size=DEFAULT_CONFIG["ui_font_size"])
         else:
             self.cfg.update(editor_font_size=self.cfg["editor_font_size"] + delta,
-                            console_font_size=self.cfg["console_font_size"] + delta)
+                            console_font_size=self.cfg["console_font_size"] + delta,
+                            ui_font_size=self.cfg["ui_font_size"] + delta)
 
     def open_settings(self) -> None:
         if self._settings is not None and self._settings.winfo_exists():
@@ -1140,15 +1223,15 @@ class VeriFlowApp(ctk.CTk):
             ready = info["tb"] is not None
             active = name == self.module
             bg = VS["selected"] if active else "transparent"
-            row = ctk.CTkFrame(self.mod_list, height=26, corner_radius=0, fg_color=bg, cursor="hand2")
+            row = ctk.CTkFrame(self.mod_list, height=int(32 * FontBook.base / 13), corner_radius=0, fg_color=bg, cursor="hand2")
             row.grid(row=r, column=0, sticky="ew")
             row.pack_propagate(False)
             ctk.CTkFrame(row, width=2, corner_radius=0, fg_color=VS["accent"] if active else bg).pack(side="left", fill="y")
             dot = ctk.CTkLabel(row, text="●", width=18, font=font(11), text_color=VS["ready_dot"] if ready else VS["warn_dot"])
             dot.pack(side="left", padx=(10, 2))
-            lab = ctk.CTkLabel(row, text=name, anchor="w", font=font(13), text_color=VS["selected_fg"] if active else VS["text"])
+            lab = ctk.CTkLabel(row, text=name, anchor="w", font=font(12), text_color=VS["selected_fg"] if active else VS["text"])
             lab.pack(side="left", fill="x", expand=True)
-            badge = ctk.CTkLabel(row, text=" Ready " if ready else " No TB ", height=16, corner_radius=8, font=font(10),
+            badge = ctk.CTkLabel(row, text=" Ready " if ready else " No TB ", height=20, corner_radius=9, font=font(10),
                                  fg_color=VS["badge"] if ready else ("#F5E3B3", "#4D3B0F"),
                                  text_color=VS["badge_fg"] if ready else ("#7A5A00", "#E9C46A"))
             badge.pack(side="right", padx=8)
@@ -1842,6 +1925,7 @@ class VeriFlowApp(ctk.CTk):
     # ---- module context menus
     def _module_menu(self, e, name: str) -> None:
         m = tk.Menu(self, tearoff=0)
+        style_menu(m, self, self.cfg)
         m.add_command(label=f"Open {name}", command=lambda: self.select_module(name))
         m.add_separator()
         m.add_command(label="🧪 Generate Testbench (exhaustive)", command=lambda: self._tb_for(name, False))

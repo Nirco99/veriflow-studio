@@ -75,6 +75,45 @@ def px_font(points: int | float, widget) -> int:
     return -max(6, round(float(points) * 4 / 3 * ui_scale(widget)))
 
 
+class FontBook:
+    """Shared, live-resizable UI fonts. Every CTk widget built with ui_font() holds one of these CTkFont objects,
+    so changing the UI font size (A+/A-, Ctrl+wheel, presets) re-flows the whole interface instantly."""
+    base = 13
+    _fonts: dict = {}
+
+    @classmethod
+    def get(cls, delta: int = 0, weight: str = "normal", slant: str = "roman", family: str = "Segoe UI") -> ctk.CTkFont:
+        key = (delta, weight, slant, family)
+        if key not in cls._fonts:
+            cls._fonts[key] = ctk.CTkFont(family=family, size=max(8, cls.base + delta), weight=weight, slant=slant)
+        return cls._fonts[key]
+
+    @classmethod
+    def set_base(cls, size: int) -> None:
+        cls.base = int(size)
+        for (delta, _w, _s, _f), f in cls._fonts.items():
+            f.configure(size=max(8, cls.base + delta))
+
+
+def ui_font(delta: int = 0, weight: str = "normal", slant: str = "roman", family: str = "Segoe UI") -> ctk.CTkFont:
+    """UI chrome font relative to the user's UI font size (delta 0 = the base size, e.g. 13)."""
+    return FontBook.get(delta, weight, slant, family)
+
+
+def ui_px(widget, delta: int = 0) -> int:
+    """Pixel size of the UI font for raw tk widgets (menus, Treeview, canvases, status bar)."""
+    return max(9, round((FontBook.base + delta) * ui_scale(widget)))
+
+
+def style_menu(menu: tk.Menu, widget, config) -> None:
+    """Readable dark/light context menu: Segoe UI at the UI font size, VS Code colours."""
+    dark = is_dark(config)
+    th = VSCODE_THEMES["Dark" if dark else "Light"]
+    menu.configure(font=("Segoe UI", -ui_px(widget, -1)), bg=th["group"], fg="#F0F0F0" if dark else "#1F1F1F",
+                   activebackground=th["selected"], activeforeground="#FFFFFF" if dark else "#000000",
+                   disabledforeground=th["muted"], bd=1, relief="solid", activeborderwidth=0, tearoff=0)
+
+
 def is_dark(config) -> bool:
     mode = config["appearance_mode"]
     return ctk.get_appearance_mode() == "Dark" if mode == "System" else mode == "Dark"
@@ -143,7 +182,7 @@ class _Tooltip:
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x + 14}+{y + 10}")
         tk.Label(self.tip, text=text, justify="left", bg="#FFFBE6", fg="#222", relief="solid", bd=1,
-                 font=("Segoe UI", 9), wraplength=520, padx=6, pady=3).pack()
+                 font=("Segoe UI", -ui_px(self.widget, -2)), wraplength=640, padx=6, pady=3).pack()
 
     def hide(self) -> None:
         if self.tip is not None:
@@ -154,7 +193,7 @@ class _Tooltip:
 def ghost_button(master, text: str, command=None, width: int = 0, height: int = 26, **kw) -> ctk.CTkButton:
     """Flat VS Code style secondary button (1px border, transparent fill)."""
     opts = dict(corner_radius=3, height=height, fg_color="transparent", hover_color=VS["hover"], border_width=1,
-                border_color=VS["group_border"], text_color=VS["text"], font=ctk.CTkFont(size=12))
+                border_color=VS["group_border"], text_color=VS["text"], font=ui_font(0))
     opts.update(kw)
     opts["width"] = width          # 0 = shrink to the text (CTk's default 140px is far too wide for a toolbar)
     return ctk.CTkButton(master, text=text, command=command, **opts)
@@ -163,7 +202,7 @@ def ghost_button(master, text: str, command=None, width: int = 0, height: int = 
 def icon_button(master, text: str, command=None, width: int = 28, height: int = 24, **kw) -> ctk.CTkButton:
     """Borderless icon button (VS Code toolbar action)."""
     opts = dict(corner_radius=3, width=width, height=height, fg_color="transparent", hover_color=VS["hover"],
-                text_color=VS["text"], border_width=0, font=ctk.CTkFont(size=13))
+                text_color=VS["text"], border_width=0, font=ui_font(1))
     opts.update(kw)
     return ctk.CTkButton(master, text=text, command=command, **opts)
 
@@ -171,7 +210,7 @@ def icon_button(master, text: str, command=None, width: int = 28, height: int = 
 def seg_style() -> dict:
     return dict(corner_radius=3, height=24, fg_color=("#E5E5E5", "#2D2D2D"), selected_color=("#BCD9F5", "#04395E"),
                 selected_hover_color=("#A9CDEF", "#0A4A75"), unselected_color=("#F3F3F3", "#2D2D2D"),
-                unselected_hover_color=VS["hover"], text_color=("#1F1F1F", "#E0E0E0"), font=ctk.CTkFont(size=12))
+                unselected_hover_color=VS["hover"], text_color=("#1F1F1F", "#E0E0E0"), font=ui_font(0))
 
 
 def entry_style() -> dict:
@@ -181,7 +220,7 @@ def entry_style() -> dict:
 def option_style() -> dict:
     return dict(corner_radius=3, height=26, fg_color=VS["input"], button_color=VS["input"], button_hover_color=VS["hover"],
                 text_color=VS["text"], dropdown_fg_color=VS["group"], dropdown_hover_color=VS["hover"],
-                dropdown_text_color=VS["text"], font=ctk.CTkFont(size=12), dynamic_resizing=False)
+                dropdown_text_color=VS["text"], font=ui_font(0), dropdown_font=ui_font(0), dynamic_resizing=False)
 
 
 def hline(master, **kw) -> ctk.CTkFrame:
@@ -226,11 +265,11 @@ class VerilogCodeEditor(ctk.CTkFrame):
         self.grid_rowconfigure(4, weight=1)
 
         # VS Code editor tab strip (34px) + breadcrumb (20px) + hairline
-        self.tabstrip = ctk.CTkFrame(self, corner_radius=0, fg_color=VS["tabstrip"], height=34)
+        self.tabstrip = ctk.CTkFrame(self, corner_radius=0, fg_color=VS["tabstrip"], height=38)
         self.tabstrip.grid(row=0, column=0, sticky="ew")
         self.tabstrip.pack_propagate(False)
-        self.crumb = ctk.CTkLabel(self, text="", anchor="w", height=20, corner_radius=0, text_color=VS["breadcrumb_fg"],
-                                  font=ctk.CTkFont(size=11))
+        self.crumb = ctk.CTkLabel(self, text="", anchor="w", height=24, corner_radius=0, text_color=VS["breadcrumb_fg"],
+                                  font=ui_font(-1))
         self.crumb.grid(row=1, column=0, sticky="ew", padx=(14, 6))
         hline(self).grid(row=2, column=0, sticky="ew")
 
@@ -266,7 +305,7 @@ class VerilogCodeEditor(ctk.CTkFrame):
         self.gutter = tk.Canvas(body, width=48, highlightthickness=0, bd=0)
         self.gutter.grid(row=0, column=0, sticky="ns")
         self.text = tk.Text(body, undo=True, maxundo=100, autoseparators=True, wrap="none", bd=0, highlightthickness=0,
-                            padx=6, pady=4, font=self.font, exportselection=False, insertwidth=2, spacing1=1, spacing3=1)
+                            padx=6, pady=4, font=self.font, exportselection=False, insertwidth=2, spacing1=2, spacing3=2)
         self.text.grid(row=0, column=1, sticky="nsew")
         self.vsb = slim_scrollbar(body, self.text.yview)
         self.vsb.grid(row=0, column=2, sticky="ns")
@@ -373,12 +412,12 @@ class VerilogCodeEditor(ctk.CTkFrame):
         row = ctk.CTkFrame(tab, fg_color="transparent", corner_radius=0)
         row.pack(side="top", fill="both", expand=True, padx=(10, 8))
         text, color = BADGE.get(t["role"], ("V", VS["text"]))
-        widgets = [ctk.CTkLabel(row, text=text, text_color=color, font=ctk.CTkFont(size=11, weight="bold"), width=18)]
+        widgets = [ctk.CTkLabel(row, text=text, text_color=color, font=ui_font(-1, "bold"), width=18)]
         name = t["text"] + ("  (missing)" if t.get("missing") else "")
         fg = VS["tab_active_fg"] if active else VS["tab_inactive_fg"]
         widgets.append(ctk.CTkLabel(row, text=name, text_color=fg,
-                                    font=ctk.CTkFont(size=12, slant="italic" if t.get("missing") else "roman")))
-        widgets.append(ctk.CTkLabel(row, text="●" if t.get("dirty") else " ", width=14, font=ctk.CTkFont(size=11), text_color=fg))
+                                    font=ui_font(1, "bold", "italic" if t.get("missing") else "roman")))
+        widgets.append(ctk.CTkLabel(row, text="●" if t.get("dirty") else " ", width=14, font=ui_font(-1), text_color=fg))
         for w in widgets:
             w.pack(side="left", padx=(0, 4))
         vline(strip).pack(side="left", fill="y")
@@ -475,7 +514,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
             self.hsb.grid_remove()
         else:
             self.hsb.grid()
-        self.menu.configure(bg=sc["gutter_bg"], fg=sc["fg"], activebackground=sc["selection"], activeforeground=sc["fg"])
+        style_menu(self.menu, self, config)
+        style_menu(self.snippet_menu, self, config)
         self._update_current_line()
         self._redraw_gutter()
         self._render_tabs()
@@ -714,7 +754,7 @@ class VerilogCodeEditor(ctk.CTkFrame):
         if self.on_zoom:
             self.on_zoom(delta)
         else:
-            pts = 13 if delta == 0 else min(28, max(8, int(self.cfg["editor_font_size"]) + delta))
+            pts = 15 if delta == 0 else min(32, max(10, int(self.cfg["editor_font_size"]) + delta))
             self.font.configure(size=px_font(pts, self))
             self._redraw_gutter()
 
@@ -1102,20 +1142,20 @@ class TruthTableGrid(ctk.CTkFrame):
         bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 2))
         fbar = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         fbar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
-        ctk.CTkLabel(fbar, text="SHOW", text_color=VS["muted"], font=ctk.CTkFont(size=11)).pack(side="left", padx=(2, 6))
+        ctk.CTkLabel(fbar, text="SHOW", text_color=VS["muted"], font=ui_font(-1)).pack(side="left", padx=(2, 6))
         self.filter_seg = ctk.CTkSegmentedButton(fbar, values=["All", "x/z Floating", "FAIL"], command=self._set_filter, **seg_style())
         self.filter_seg.set("All")
         self.filter_seg.pack(side="left")
         self.search = ctk.CTkEntry(fbar, placeholder_text="🔍 Filter rows (e.g. 1, sum=1, 1010)…", width=260, height=24, **entry_style())
         self.search.pack(side="left", padx=10)
         self.search.bind("<KeyRelease>", lambda e: self._set_search(self.search.get()))
-        ctk.CTkLabel(bar, text="RADIX", text_color=VS["muted"], font=ctk.CTkFont(size=11)).pack(side="left", padx=(2, 6))
+        ctk.CTkLabel(bar, text="RADIX", text_color=VS["muted"], font=ui_font(-1)).pack(side="left", padx=(2, 6))
         self.radix = ctk.CTkSegmentedButton(bar, values=list(RADIXES), command=self._radix_changed, **seg_style())
         self.radix.set(config["default_radix"])
         self.radix.pack(side="left")
         ghost_button(bar, "📋 Copy CSV", lambda: self.copy("csv"), width=96, height=24).pack(side="right", padx=2)
         ghost_button(bar, "📋 Copy Markdown", lambda: self.copy("md"), width=130, height=24).pack(side="right", padx=2)
-        self.summary = ctk.CTkLabel(bar, text="No simulation yet", anchor="w", text_color=VS["text"], font=ctk.CTkFont(size=12))
+        self.summary = ctk.CTkLabel(bar, text="No simulation yet", anchor="w", text_color=VS["text"], font=ui_font(0))
         self.summary.pack(side="left", padx=14)
         self.style = ttk.Style(self)
         self.tree = ttk.Treeview(self, show="headings", style="VF.Treeview", selectmode="extended")
@@ -1192,9 +1232,11 @@ class TruthTableGrid(ctk.CTkFrame):
         self.tree.delete(*self.tree.get_children())
         ids = [f"c{i}" for i in range(len(heads))]
         self.tree.configure(columns=ids)
-        f = tkfont.Font(family=self.cfg["editor_font_family"], size=px_font(self.cfg["console_font_size"], self))
+        f = tkfont.Font(family=self.cfg["editor_font_family"], size=-ui_px(self))
+        fh = tkfont.Font(family="Segoe UI", size=-ui_px(self), weight="bold")      # headings are bold Segoe UI
+        pad = int(28 * ui_scale(self))
         for i, (cid, h) in enumerate(zip(ids, heads)):
-            width = max([f.measure(h) + 24] + [f.measure(r[i]) + 24 for r in rows[:200]])
+            width = max([fh.measure(h) + pad] + [f.measure(r[i]) + pad for r in rows[:200]])
             self.tree.heading(cid, text=h, anchor="center")
             self.tree.column(cid, width=min(max(width, 44), 260), minwidth=36, anchor="center",
                              stretch=(i == len(heads) - 1))
@@ -1240,13 +1282,11 @@ def style_treeview(style: ttk.Style, config, scale: float = 1.0) -> None:
     th = VSCODE_THEMES["Dark" if dark else "Light"]
     bg, fg = th["table_row"], th["table_fg"]
     head_bg, head_fg = th["table_head"], th["table_head_fg"]
-    pts = int(config["console_font_size"])
-    size = -max(6, round(pts * 4 / 3 * scale))
-    fam = config["editor_font_family"]
+    px = max(9, round(int(config.get("ui_font_size", FontBook.base)) * scale))
     style.configure("VF.Treeview", background=bg, fieldbackground=bg, foreground=fg, borderwidth=0,
-                    rowheight=int(-size * 1.7) + 6, font=(fam, size))
+                    rowheight=int(px * 1.75) + 8, font=(config["editor_font_family"], -px))      # spacious, never clipped
     style.configure("VF.Treeview.Heading", background=head_bg, foreground=head_fg, relief="flat", borderwidth=0,
-                    font=("Segoe UI", size, "bold"), padding=(6, 4))
+                    font=("Segoe UI", -px, "bold"), padding=(8, 6))
     style.map("VF.Treeview", background=[("selected", th["selected"])], foreground=[("selected", th["selected_fg"])])
     style.map("VF.Treeview.Heading", background=[("active", th["hover"])], relief=[("active", "flat")])
     style.layout("VF.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
@@ -1271,8 +1311,8 @@ class MiniWaveformViewer(ctk.CTkFrame):
         self.all_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(bar, text="Internal signals", variable=self.all_var, command=self._refilter, checkbox_width=15,
                         checkbox_height=15, corner_radius=2, border_width=1, text_color=VS["text"],
-                        font=ctk.CTkFont(size=12)).pack(side="left", padx=12)
-        self.info = ctk.CTkLabel(bar, text="No waveform yet", anchor="w", text_color=VS["muted"], font=ctk.CTkFont(size=12))
+                        font=ui_font(0)).pack(side="left", padx=12)
+        self.info = ctk.CTkLabel(bar, text="No waveform yet", anchor="w", text_color=VS["muted"], font=ui_font(0))
         self.info.pack(side="left", padx=8)
         self.gtk_btn = ghost_button(bar, "📈 Open in GTKWave", lambda: on_open_gtkwave and on_open_gtkwave(), width=150, height=24)
         self.gtk_btn.pack(side="right", padx=2)
@@ -1406,13 +1446,15 @@ class MiniWaveformViewer(ctk.CTkFrame):
         n.delete("all")
         col = self.col
         sc = ui_scale(self)
-        self.row_h, self.axis_h, name_w = int(self.ROW_H * sc), int(self.AXIS_H * sc), int(self.NAME_W * sc)
+        k = FontBook.base / 13                                # canvas geometry grows with the UI text size
+        self.row_h, self.axis_h, name_w = int(self.ROW_H * sc * k), int(self.AXIS_H * sc * k), int(self.NAME_W * sc * k)
         if int(n.cget("width")) != name_w:
             n.configure(width=name_w)
-        fpx = px_font(max(8, int(self.cfg["console_font_size"]) - 1), self)
+        fpx = -ui_px(self, -1)
         fsz = -fpx * 0.75
         fam = self.cfg["editor_font_family"]
         font, bold = (fam, fpx), (fam, fpx, "bold")
+        self.names.configure(width=name_w)
         if not self.signals:
             c.create_text(20, 30, anchor="w", text=self.source or "No waveform yet - press ▶ RUN", fill=col["dim"], font=font)
             self.info.configure(text=self.source or "No waveform yet")
@@ -1521,7 +1563,7 @@ class ActivityBar(ctk.CTkFrame):
         bar = ctk.CTkFrame(cell, width=2, corner_radius=0, fg_color=VS["activity"])
         bar.grid(row=0, column=0, sticky="ns")
         cell.grid_rowconfigure(0, weight=1)
-        lab = ctk.CTkLabel(cell, text=icon, font=ctk.CTkFont(family="Segoe UI Symbol", size=20), text_color=VS["activity_fg"])
+        lab = ctk.CTkLabel(cell, text=icon, font=ui_font(7, family="Segoe UI Symbol"), text_color=VS["activity_fg"])
         lab.grid(row=0, column=1, sticky="nsew")
         for w in (cell, lab):
             w.bind("<Button-1>", lambda e, k=key: self.on_click(k))
@@ -1558,7 +1600,7 @@ class PanelTabs(ctk.CTkFrame):
         self._current: str | None = None
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
-        self.header = ctk.CTkFrame(self, height=32, corner_radius=0, fg_color=VS["panel"])
+        self.header = ctk.CTkFrame(self, height=38, corner_radius=0, fg_color=VS["panel"])
         self.header.grid(row=0, column=0, sticky="ew")
         self.header.grid_propagate(False)
         self.header.grid_columnconfigure(1, weight=1)
@@ -1579,11 +1621,10 @@ class PanelTabs(ctk.CTkFrame):
         cell.grid_rowconfigure(0, weight=1)
         inner = ctk.CTkFrame(cell, width=1, height=1, fg_color="transparent", corner_radius=0)
         inner.grid(row=0, column=0, sticky="nsew", padx=6)
-        lab = ctk.CTkLabel(inner, text=title.upper(), font=ctk.CTkFont(size=11), text_color=VS["muted"], cursor="hand2",
-                           width=len(title) * 7 + 6)          # explicit: the cell hugs this width
+        lab = ctk.CTkLabel(inner, text=title.upper(), font=ui_font(-1, "bold"), text_color=VS["muted"], cursor="hand2")
         lab.pack(side="left")
         badge = ctk.CTkLabel(inner, text="", width=20, height=16, corner_radius=8, fg_color=VS["badge"], text_color=VS["badge_fg"],
-                             font=ctk.CTkFont(size=10, weight="bold"))
+                             font=ui_font(-2, "bold"))
         under = ctk.CTkFrame(cell, width=1, height=2, corner_radius=0, fg_color=VS["panel"])   # width=1: hug the label
         under.grid(row=1, column=0, sticky="ew")
         frame = ctk.CTkFrame(self.content, corner_radius=0, fg_color=VS["panel_content"])
@@ -1637,7 +1678,7 @@ class SideSection(ctk.CTkFrame):
         self.title, self.open, self.on_toggle = title, True, on_toggle
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
-        self.head = ctk.CTkLabel(self, text="", anchor="w", height=22, font=ctk.CTkFont(size=11, weight="bold"),
+        self.head = ctk.CTkLabel(self, text="", anchor="w", height=28, font=ui_font(-1, "bold"),
                                  text_color=VS["sidebar_header"], cursor="hand2")
         self.head.grid(row=0, column=0, sticky="ew", padx=4)
         self.head.bind("<Button-1>", lambda e: self.toggle())
@@ -1683,8 +1724,8 @@ class PinoutDiagram(tk.Canvas):
         self.configure(bg=bg)
         w, h = max(self.winfo_width(), 200), max(self.winfo_height(), 160)
         sc = ui_scale(self)
-        f = (self.cfg["editor_font_family"], -max(9, round(12 * sc)))
-        fb = ("Segoe UI", -max(10, round(14 * sc)), "bold")
+        f = (self.cfg["editor_font_family"], -ui_px(self, -1), "bold")      # pin names: Consolas bold
+        fb = ("Segoe UI", -ui_px(self, 1), "bold")                         # chip title
         if not self.info:
             self.create_text(w / 2, h / 2, text="Open a module to see its pinout", fill=muted, font=f)
             return

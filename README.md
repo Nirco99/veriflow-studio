@@ -314,6 +314,21 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 extension, they are recognized safely by their header (`#! … vvp`) – your `.v` files are never touched. `.vcd`
 dumps are left in place (delete them manually if your course asks you to).
 
+#### 🔠 Comfortable typography, global zoom & size presets
+
+* Comfortable defaults: **15 pt** editor, **13 pt** console and **13 pt** UI text (Segoe UI for menus, tabs, sidebar and
+  buttons; Consolas for code, tables and the waveform/pinout labels). Configs saved by older versions with smaller
+  sizes are lifted to these defaults once, on first start.
+* **Global zoom** – `A-` / `A+`, `Ctrl+MouseWheel`, `Ctrl+Plus` / `Ctrl+Minus` scale the editor, console **and** the
+  whole UI together (panel tabs, menus, truth table rows/headings, waveform rows, IC pinout, status bar). `Ctrl+0`
+  resets everything to the defaults.
+* **UI & text size preset** (Settings → Appearance & Font): `Compact (12pt)`, `Comfortable (14-15pt)`,
+  `Large / High-Visibility (17pt)`, `Extra Large (20pt)` – or set the three sizes individually (shown as `Custom`).
+* Readable **dark context menus** everywhere (editor right-click, snippets, module menu) at the UI font size, with
+  VS Code colours instead of tiny native menus.
+* The toolbar is **responsive**: when the window is too narrow for the full labels, buttons collapse to their icons
+  (📂 🔍 🧪 💾 ⚡ 📦 📝 🧹) and show a tooltip on hover; the labels come back as soon as there is room.
+
 #### 🧩 Demo mode (no Icarus Verilog installed)
 
 If `iverilog.exe` is not found, an amber banner appears and VeriFlow switches to a **built-in Python gate-level
@@ -392,8 +407,10 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | | Editor colour scheme | `editor_color_scheme` | `Dark Modern` (VS Code Dark+, default), `Light Modern` (VS Code Light+), `One Dark`, `Monokai`, `GitHub Light`, `High Contrast` |
 | | UI scaling | `ui_scale_percent` | `80` `90` `100` `110` `125` `150` % |
 | | Editor font family | `editor_font_family` | `Consolas`, `Cascadia Code`, `JetBrains Mono`, `Courier New`, `Lucida Console` |
-| | Editor font size | `editor_font_size` | 8–28 pt (default 13) – also `A-` / `A+`, `Ctrl+wheel` |
-| | Console / table font size | `console_font_size` | 8–24 pt (default 12) |
+| | Editor font size | `editor_font_size` | 10–32 pt (default 15) – also `A-` / `A+`, `Ctrl+wheel` |
+| | Console font size | `console_font_size` | 10–28 pt (default 13) |
+| | UI & text size preset | – | `Compact (12pt)`, `Comfortable (14-15pt)`, `Large / High-Visibility (17pt)`, `Extra Large (20pt)`, `Custom` |
+| | UI font size (menus, tabs, tables, sidebar) | `ui_font_size` | 10–24 pt (default 13) |
 | | Default radix | `default_radix` | `Binary`, `Hex`, `Unsigned Dec`, `Signed Dec` |
 | Editor Behavior | Editor layout | `editor_split_layout` | `Side-by-Side` (.v + _tb.v, default) or `Tabbed` |
 | | Tab size | `tab_size` | 2, 4 (default), 8 |
@@ -443,7 +460,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | `Ctrl+D` | Duplicate line / selection |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | Undo / redo |
 | `Tab` / `Shift+Tab` | Indent / outdent selection |
-| `Ctrl+MouseWheel`, `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Zoom editor & console font in / out / reset |
+| `Ctrl+MouseWheel`, `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | Zoom editor, console and the whole UI in / out / reset |
 
 ### Architecture & file structure
 
@@ -785,6 +802,21 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 מזוהים בבטחה לפי הכותרת שלהם (`#! … vvp`) – קבצי ה-`.v` שלכם לעולם לא נמחקים. קבצי `.vcd` נשארים (מחקו אותם ידנית
 אם הקורס דורש).
 
+#### 🔠 טיפוגרפיה נוחה, זום גלובלי ופריסטים של גודל טקסט
+
+* ברירות מחדל נוחות לקריאה: **15** בעורך, **13** בקונסולה ו-**13** בממשק (Segoe UI לתפריטים, לשוניות, סרגל צד וכפתורים;
+  Consolas לקוד, לטבלאות ולתוויות של הגלים ותרשים הפינים). הגדרות שנשמרו בגרסאות קודמות עם גדלים קטנים יותר מוגדלות
+  לברירות המחדל האלה פעם אחת, בהפעלה הראשונה.
+* **זום גלובלי** – `A-` / `A+`, `Ctrl+גלגלת`, `Ctrl+Plus` / `Ctrl+Minus` מגדילים את העורך, הקונסולה **וגם** את כל
+  הממשק יחד (לשוניות הפאנל, תפריטים, שורות וכותרות טבלת האמת, שורות הגלים, תרשים הפינים, שורת המצב). `Ctrl+0` מאפס
+  הכל לברירת המחדל.
+* **פריסט גודל ממשק וטקסט** (הגדרות ← Appearance & Font): `Compact (12pt)`, `Comfortable (14-15pt)`,
+  `Large / High-Visibility (17pt)`, `Extra Large (20pt)` – או הגדרה ידנית של שלושת הגדלים (מוצג כ-`Custom`).
+* **תפריטי קליק-ימני כהים וקריאים** בכל מקום (עורך, סניפטים, תפריט המודול) בגודל הגופן של הממשק ובצבעי VS Code, במקום
+  תפריטי מערכת זעירים.
+* סרגל הכלים **רספונסיבי**: כשהחלון צר מדי לתוויות המלאות, הכפתורים מתכווצים לאייקונים (📂 🔍 🧪 💾 ⚡ 📦 📝 🧹) ומציגים
+  הסבר במעבר עכבר; התוויות חוזרות ברגע שיש מקום.
+
 #### 🧩 מצב הדגמה (כש-Icarus Verilog לא מותקן)
 
 אם `iverilog.exe` לא נמצא, מופיע פס כתום ו-VeriFlow עובר ל**סימולטור שערים מובנה ב-Python** (תכנונים של סיבית אחת
@@ -869,8 +901,10 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | | ערכת צבעי העורך | `editor_color_scheme` | `Dark Modern` (VS Code Dark+, ברירת מחדל), `Light Modern` (VS Code Light+), `One Dark`, `Monokai`, `GitHub Light`, `High Contrast` |
 | | הגדלת ממשק | `ui_scale_percent` | `80` `90` `100` `110` `125` `150` % |
 | | גופן העורך | `editor_font_family` | `Consolas`, `Cascadia Code`, `JetBrains Mono`, `Courier New`, `Lucida Console` |
-| | גודל גופן העורך | `editor_font_size` | 8–28 (ברירת מחדל 13) – גם `A-` / `A+` ו-`Ctrl+גלגלת` |
-| | גודל גופן קונסולה / טבלה | `console_font_size` | 8–24 (ברירת מחדל 12) |
+| | גודל גופן העורך | `editor_font_size` | 10–32 (ברירת מחדל 15) – גם `A-` / `A+` ו-`Ctrl+גלגלת` |
+| | גודל גופן הקונסולה | `console_font_size` | 10–28 (ברירת מחדל 13) |
+| | פריסט גודל ממשק וטקסט | – | `Compact (12pt)`, `Comfortable (14-15pt)`, `Large / High-Visibility (17pt)`, `Extra Large (20pt)`, `Custom` |
+| | גודל גופן הממשק (תפריטים, לשוניות, טבלאות, סרגל צד) | `ui_font_size` | 10–24 (ברירת מחדל 13) |
 | | בסיס ברירת מחדל | `default_radix` | `Binary`, `Hex`, `Unsigned Dec`, `Signed Dec` |
 | Editor Behavior | פריסת העורך | `editor_split_layout` | `Side-by-Side` (‏.v + _tb.v, ברירת מחדל) או `Tabbed` |
 | | גודל טאב | `tab_size` | 2, 4 (ברירת מחדל), 8 |
@@ -921,7 +955,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | `Ctrl+D` | שכפול שורה / בחירה |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | ביטול / ביצוע מחדש |
 | `Tab` / `Shift+Tab` | הזחה / ביטול הזחה של הבחירה |
-| `Ctrl+גלגלת`, `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | הגדלה / הקטנה / איפוס של גופן העורך והקונסולה |
+| `Ctrl+גלגלת`, `Ctrl+Plus`, `Ctrl+Minus`, `Ctrl+0` | הגדלה / הקטנה / איפוס של העורך, הקונסולה וכל הממשק |
 
 ### ארכיטקטורה ומבנה קבצים
 
