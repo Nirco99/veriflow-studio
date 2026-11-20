@@ -291,12 +291,31 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 * A VS Code-styled **IC block diagram**: inputs on the left, outputs/inouts on the right, buses drawn as double lines with
   their `[msb:lsb]` range, and the module name with its gate count and depth on the chip.
 
-#### ⌨ Autocomplete (`Ctrl+Space`) & port hints
+#### ⌨ Live IntelliSense autocomplete (as you type + `Ctrl+Space`)
 
-* `Ctrl+Space` opens a completion list with every module of the workspace and enabled packages (inserts a full
-  named-port instantiation `HalfAdder u_halfadder ( .s (), .c (), … );` with the cursor in the first port), the
-  ports/wires/regs declared in the current file (no more typos that create implicit wires), and Verilog keywords and
-  system tasks (`$display`, `$monitor`, `$finish`, `$dumpvars`…). Arrow keys + `Enter`/`Tab` accept, `Esc` closes.
+* A VS Code style suggestion list opens **while you type**: after 2 letters of a name, on `$`, on `` ` `` and on `.`
+  inside a module instance. `Ctrl+Space` opens it at any time. The popup never takes the keyboard focus, so you can
+  keep typing to filter. `↑`/`↓` move, `Tab`/`Enter` insert, `Esc`, a click elsewhere, `Space` or `;` close it.
+  `Enter` after a word that's already complete (`end`, `a`) just starts a new line.
+* Every row has a coloured kind badge and a detail column:
+  * **`M` modules**: every module from the workspace, the course library (`compstruct\lib`) and all enabled packages,
+    in two variants. **Full Instantiation** inserts `Mux4 u_mux4_1 (.d(), .sel(), .y());` with an auto-numbered
+    instance name and the caret inside the first `.port()`. **Module Name** inserts just the name. A bottom card shows
+    the port signature and source package, e.g. `FullAdder (input a, input b, input cin -> output sum, output cout) · Workspace`.
+  * **`P` ports**: type `.` inside `FullAdder fa1 ( … ` and you get that module's ports (`.cin()  [input 1-bit]`).
+    Ports that aren't connected yet come first, and accepting one puts the caret inside `.cin(|)`. Parameterised
+    (`#(…)`) and multi-line instances work too.
+  * **`W` signals**: the `input/output/inout/wire/reg/logic/integer/parameter` names declared in the current file
+    (no more typos that create implicit wires).
+  * **`K` keywords and block snippets**: `module (template)`, `always @(*)`, `always @(posedge clk)`,
+    `initial begin … end`, `case … endcase`, `generate`, `function`, `task`… The caret lands inside the block.
+  * **`G` gate primitives** with the pin order (`nand (out, in1, in2, …)`, `bufif1 (out, in, ctrl)`): the output comes first.
+  * **`S` system tasks and directives**: `$display("…")`, `$monitor`, `$finish;`, `$dumpvars(0, …)`, `$readmemb`…,
+    `` `timescale 1ns/1ps``, `` `include``, `` `define``, `` `ifdef``…
+* Matching is case-insensitive: prefix first, then CamelCase initials (`fa` → `FullAdder`, `ha` → `HalfAdder`), then
+  substring. Ranking: ports after `.`, then modules and local signals, then gates and keywords, then system tasks.
+* Turn off the as-you-type popup in Settings → Editor Behavior (`Enable Live Autocomplete (IntelliSense)`).
+  `Ctrl+Space` always works.
 * With the cursor on a module name, the status bar shows its port signature and package, e.g.
   `◆ HalfAdder (output s, output c, input a, input b) · Lab4`.
 
@@ -469,6 +488,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | | Auto-save on focus loss | `auto_save_on_focus_loss` | off |
 | | On startup | `startup_mode` | `welcome_screen` (default), `reopen_last`, `empty_window` |
 | | Check GitHub for updates | `check_for_updates` | on (startup + every 30 min); `🔔 Check for Updates Now` button |
+| | Enable Live Autocomplete (IntelliSense) as you type | `live_autocomplete` | on (`Ctrl+Space` always works) |
 | Compiler & Toolchain | iverilog.exe / vvp.exe / gtkwave.exe | `iverilog_path`, `vvp_path`, `gtkwave_path` | `C:\iverilog\bin\…`, `C:\iverilog\gtkwave\bin\gtkwave.exe` |
 | | Lecturer library (`-y`) | `lib_dir` | `C:\iverilog\compstruct\lib` |
 | | notepad++.exe | `notepad_pp_path` | `C:\Program Files\Notepad++\notepad++.exe` |
@@ -503,7 +523,7 @@ Open **⚙** (top right, activity bar, or `Ctrl+,`). Every change applies **imme
 | `Ctrl+,` | Settings |
 | `Ctrl+F` / `Ctrl+H` | Find / Find & Replace bar (`Enter`, `Shift+Enter`, `F3` = next/previous) |
 | `Ctrl+G` | Go to line |
-| `Ctrl+Space` | Autocomplete: modules (full instantiation), local signals, keywords, system tasks |
+| `Ctrl+Space` | IntelliSense: modules (full instantiation / name), `.port()` connections, signals, keywords, gates, `$tasks`, directives (it also opens as you type) |
 | `Ctrl+/` | Toggle `//` comment on the selected lines |
 | `Ctrl+D` | Duplicate line / selection |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | Undo / redo |
@@ -525,6 +545,7 @@ veriflow-studio/
 ├── config_manager.py    # Settings schema + validation + config.json persistence, VS Code colour tokens,
 │                        # editor colour schemes, toolchain auto-detection
 ├── welcome.py           # Welcome / Get Started page, New Module & Project wizard, update notification card
+├── intellisense.py      # IntelliSense engine (no GUI): context (word / .port / $ / `), candidates, fuzzy ranking
 ├── updater.py           # GitHub release + version.json update checker, git-pull / .exe self-updater (stdlib only)
 ├── version.json         # {"version", "notes"} on main - bump it to notify users running from source
 ├── package_manager.py   # Global package vault: .v / folder / .zip import, enable/remove, -y / -l resolution,
@@ -830,12 +851,32 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 * **תרשים שבב (IC)** בסגנון VS Code: כניסות משמאל, יציאות/inout מימין, אפיקים מצוירים כקו כפול עם הטווח `[msb:lsb]`,
   ושם המודול עם מספר השערים והעומק על השבב.
 
-#### ⌨ השלמה אוטומטית (`Ctrl+Space`) ורמזי פורטים
+#### ⌨ השלמה אוטומטית חיה בסגנון IntelliSense (תוך כדי הקלדה + `Ctrl+Space`)
 
-* `Ctrl+Space` פותח רשימת השלמות עם כל המודולים מתיקיית העבודה ומהחבילות הפעילות (מוסיף מופע מלא עם פורטים בשם
-  `HalfAdder u_halfadder ( .s (), .c (), … );` והסמן בפורט הראשון), הפורטים/ה-wire/ה-reg שהוגדרו בקובץ הנוכחי (בלי
-  שגיאות הקלדה שיוצרות חוטים מרומזים), ומילות מפתח ומשימות מערכת (`$display`, `$monitor`, `$finish`, `$dumpvars`…).
-  חיצים + `Enter`/`Tab` לבחירה, `Esc` לסגירה.
+* רשימת הצעות בסגנון VS Code נפתחת **תוך כדי הקלדה**: אחרי 2 אותיות של שם, על `$`, על `` ` `` ועל `.` בתוך מופע של
+  מודול. `Ctrl+Space` פותח אותה בכל רגע. החלונית לא לוקחת את המקלדת, כך שאפשר להמשיך להקליד כדי לסנן. `↑`/`↓` לתנועה,
+  `Tab`/`Enter` להכנסה, `Esc`, לחיצה במקום אחר, `Space` או `;` לסגירה. `Enter` אחרי מילה שכבר שלמה (`end`, `a`)
+  פשוט יורד שורה.
+* לכל שורה יש תג צבעוני של הסוג ועמודת פרטים:
+  * **`M` מודולים**: כל מודול מתיקיית העבודה, מספריית הקורס (`compstruct\lib`) ומכל החבילות הפעילות, בשתי גרסאות.
+    **Full Instantiation** מכניס `Mux4 u_mux4_1 (.d(), .sel(), .y());` עם שם מופע ממוספר אוטומטית והסמן בתוך
+    ה-`.port()` הראשון. **Module Name** מכניס רק את השם. כרטיס בתחתית מציג את חתימת הפורטים ואת החבילה, למשל
+    `FullAdder (input a, input b, input cin -> output sum, output cout) · Workspace`.
+  * **`P` פורטים**: מקלידים `.` בתוך `FullAdder fa1 ( … ` ומקבלים את הפורטים של המודול הזה (`.cin()  [input 1-bit]`).
+    פורטים שעדיין לא חוברו מופיעים ראשונים, ובחירה בפורט שמה את הסמן בתוך `.cin(|)`. עובד גם עם מופעים עם פרמטרים
+    (`#(…)`) ועם מופעים שמתפרסים על כמה שורות.
+  * **`W` אותות**: השמות שהוגדרו בקובץ הנוכחי כ-`input/output/inout/wire/reg/logic/integer/parameter` (בלי שגיאות
+    הקלדה שיוצרות חוטים מרומזים).
+  * **`K` מילות מפתח ותבניות בלוק**: `module (template)`, `always @(*)`, `always @(posedge clk)`,
+    `initial begin … end`, `case … endcase`, `generate`, `function`, `task`… והסמן נוחת בתוך הבלוק.
+  * **`G` שערים בסיסיים** עם סדר הפינים (`nand (out, in1, in2, …)`, `bufif1 (out, in, ctrl)`): היציאה תמיד ראשונה.
+  * **`S` משימות מערכת והנחיות**: `$display("…")`, `$monitor`, `$finish;`, `$dumpvars(0, …)`, `$readmemb`…,
+    `` `timescale 1ns/1ps``, `` `include``, `` `define``, `` `ifdef``…
+* ההתאמה לא תלויה ברישיות: קודם התחלת מילה, אחר כך ראשי תיבות של CamelCase (`fa` → `FullAdder`, `ha` → `HalfAdder`),
+  ואז מחרוזת חלקית. סדר הדירוג: פורטים אחרי `.`, אחר כך מודולים ואותות מקומיים, אחר כך שערים ומילות מפתח, ובסוף
+  משימות מערכת.
+* אפשר לכבות את הפתיחה האוטומטית בהגדרות ← Editor Behavior (`Enable Live Autocomplete (IntelliSense)`).
+  `Ctrl+Space` תמיד עובד.
 * כשהסמן על שם של מודול, שורת הסטטוס מציגה את חתימת הפורטים שלו ואת החבילה, למשל
   `◆ HalfAdder (output s, output c, input a, input b) · Lab4`.
 
@@ -1010,6 +1051,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | | שמירה ביציאה מהחלון | `auto_save_on_focus_loss` | כבוי |
 | | בהפעלה | `startup_mode` | `welcome_screen` (ברירת מחדל), `reopen_last`, `empty_window` |
 | | בדיקת עדכונים ב-GitHub | `check_for_updates` | פעיל (בהפעלה וכל 30 דקות); כפתור `🔔 Check for Updates Now` |
+| | השלמה אוטומטית חיה (IntelliSense) תוך כדי הקלדה | `live_autocomplete` | פעיל (`Ctrl+Space` תמיד עובד) |
 | Compiler & Toolchain | נתיבי iverilog.exe / vvp.exe / gtkwave.exe | `iverilog_path`, `vvp_path`, `gtkwave_path` | `C:\iverilog\bin\…`, `C:\iverilog\gtkwave\bin\gtkwave.exe` |
 | | ספריית המרצה (`-y`) | `lib_dir` | `C:\iverilog\compstruct\lib` |
 | | notepad++.exe | `notepad_pp_path` | `C:\Program Files\Notepad++\notepad++.exe` |
@@ -1045,7 +1087,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowSt
 | `Ctrl+,` | הגדרות |
 | `Ctrl+F` / `Ctrl+H` | חיפוש / חיפוש והחלפה (`Enter`, `Shift+Enter`, `F3` = הבא/הקודם) |
 | `Ctrl+G` | מעבר לשורה |
-| `Ctrl+Space` | השלמה אוטומטית: מודולים (מופע מלא), אותות מקומיים, מילות מפתח, משימות מערכת |
+| `Ctrl+Space` | השלמה (IntelliSense): מודולים (מופע מלא / שם), חיבורי `.port()`, אותות, מילות מפתח, שערים, `$tasks`, הנחיות (נפתח גם תוך כדי הקלדה) |
 | `Ctrl+/` | הוספה/הסרה של הערת `//` בשורות המסומנות |
 | `Ctrl+D` | שכפול שורה / בחירה |
 | `Ctrl+Z` / `Ctrl+Y` (`Ctrl+Shift+Z`) | ביטול / ביצוע מחדש |
@@ -1064,6 +1106,7 @@ veriflow-studio/
 ├── verilog_parser.py    # Module parser, course linter, testbench generator, VCD reader (no GUI)
 ├── config_manager.py    # Settings + config.json, VS Code colour tokens, toolchain auto-detection
 ├── welcome.py           # Welcome page, New Module & Project wizard, update notification card
+├── intellisense.py      # IntelliSense engine: completion context, candidates and ranking
 ├── updater.py           # GitHub update checker + 1-click self-updater (standard library only)
 ├── version.json         # current version + notes on main (update notifications)
 ├── package_manager.py   # Global package vault, .v / folder / .zip import, -y / -l resolution

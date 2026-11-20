@@ -121,6 +121,7 @@ class SettingsDialog(ctk.CTkToplevel):
                      to_cfg=lambda s: next(k for k, v in STARTUP_LABELS.items() if v == s), to_ui=lambda v: STARTUP_LABELS[v])
         self._switch(t2, 10, "Check GitHub for updates (on startup and every 30 min)", "check_for_updates")
         ghost_button(t2, "🔔 Check for Updates Now", app.check_updates_now).grid(row=11, column=1, sticky="w", pady=(6, 4))
+        self._switch(t2, 12, "Enable Live Autocomplete (IntelliSense) as you type - Ctrl+Space always works", "live_autocomplete")
 
         for r, (label, key, folder) in enumerate((("iverilog.exe", "iverilog_path", False), ("vvp.exe", "vvp_path", False),
                                                   ("gtkwave.exe", "gtkwave_path", False), ("Lecturer library (-y)", "lib_dir", True),
@@ -2356,7 +2357,7 @@ class VeriFlowApp(ctk.CTk):
         if info is None or self._update_busy:
             return
         if not self.updater.can_self_update(info):          # exe without a matching release asset yet
-            webbrowser.open(info.page_url)
+            webbrowser.open(f"https://github.com/{self.updater.repo}/releases/latest")
             return
         if not self._confirm_discard():
             return

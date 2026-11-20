@@ -15,6 +15,7 @@ from pygments.lexers.hdl import SystemVerilogLexer   # direct import: PyInstalle
 from pygments.token import Comment, Keyword, Name, Number, Operator, String
 
 from config_manager import EDITOR_SCHEMES, RADIXES, VS, VSCODE_THEMES
+from intellisense import build_items, completion_context, rank
 from verilog_parser import parse_verilog_source
 
 IS_WINDOWS = os.name == "nt"
@@ -986,6 +987,7 @@ class VerilogCodeEditor(ctk.CTkFrame):
         t.bind("<Up>", lambda e: self._comp_move(-1))
         t.bind("<Down>", lambda e: self._comp_move(1))
         t.bind("<Button-1>", lambda e: (self._close_completions(), None)[1], add="+")
+        t.bind("<MouseWheel>", lambda e: (self._close_completions(), None)[1], add="+")
         t.bind("<FocusOut>", lambda e: self.after(120, self._close_if_unfocused), add="+")
         self.gutter.bind("<Motion>", self._gutter_motion)
         self.gutter.bind("<Leave>", lambda e: self._tooltip.hide())
@@ -1111,8 +1113,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
 
     def _on_keypress(self, e):
         ch = e.char
-        if self._comp:
-            self.after_idle(self._comp_refilter)
+        if not e.state & 0x0004:              # live IntelliSense (not on Ctrl+key chords)
+            self.after_idle(lambda c=ch: self._auto_trigger(c))
         if not self.cfg["auto_close_brackets_and_blocks"] or not ch or e.state & 0x0004:
             return None
         pairs = {"(": ")", "[": "]", "{": "}", '"': '"'}
@@ -1136,8 +1138,8 @@ class VerilogCodeEditor(ctk.CTkFrame):
         return None
 
     def _on_return(self, e):
-        if self._comp:
-            return self._comp_accept()
+        if self._comp and self._comp_accept(newline_if_noop=True):
+            return "break"
         if not self.cfg["auto_indent"]:
             return None
         if self.text.tag_ranges("sel"):
@@ -1218,7 +1220,11 @@ class VerilogCodeEditor(ctk.CTkFrame):
         if val and val.strip().isdigit():
             self.goto_line(int(val.strip()))
 
-    # ------------------------------------------------------------------ autocomplete (Ctrl+Space)
+    # ------------------------------------------------------------------ IntelliSense (live + Ctrl+Space)
+    AC_ROWS = 10
+    AC_BADGE = {"M": ("#4EC9B0", "#16825D"), "P": ("#9CDCFE", "#0070C1"), "W": ("#75BEFF", "#0451A5"),
+                "K": ("#C586C0", "#AF00DB"), "G": ("#DCDCAA", "#795E26"), "S": ("#D7BA7D", "#A31515")}
+
     def word_at_cursor(self) -> str:
         line = self.text.get("insert linestart", "insert lineend")
         col = int(self.text.index("insert").split(".")[1])
@@ -1231,104 +1237,199 @@ class VerilogCodeEditor(ctk.CTkFrame):
         m = re.search(r"[A-Za-z_$][\w$]*$", self.text.get("insert linestart", "insert"))
         return m.group(0) if m else ""
 
-    def _completion_items(self) -> list[dict]:
-        items: list[dict] = []
-        seen: set[str] = set()
-        try:
-            local = parse_verilog_source(self.get_content())
-        except Exception:
-            local = []
-        for m in local:
-            for port in m["ports"]:
-                if port["name"] not in seen:
-                    seen.add(port["name"])
-                    items.append({"label": port["name"], "kind": port["direction"], "insert": port["name"],
-                                  "detail": f"{port['direction']} {port['range_text']}".strip()})
-            for n in m["declared_nets"]:
-                if n["name"] not in seen and n["kind"] != "parameter":
-                    seen.add(n["name"])
-                    items.append({"label": n["name"], "kind": n["kind"], "insert": n["name"], "detail": n["kind"]})
-        own = {m["module_name"] for m in local}
-        for mod in (self.completion_provider() if self.completion_provider else []):
-            name = mod["module_name"]
-            if name in seen or name in own:
-                continue
-            seen.add(name)
-            ports = mod.get("ports", [])
-            w = max((len(p["name"]) for p in ports), default=0)
-            body = ",\n".join(f"    .{p['name'].ljust(w)} ({CURSOR if i == 0 else ''})" for i, p in enumerate(ports))
-            inst = f"{name} u_{name.lower()} (\n{body}\n);" if ports else f"{name} u_{name.lower()} ();{CURSOR}"
-            items.append({"label": name, "kind": "module", "insert": inst, "snippet": True,
-                          "detail": "module (" + ", ".join(f"{p['direction'][:3]} {p['name']}" for p in ports) + ")"})
-        for wd in COMPLETION_WORDS:
-            if wd not in seen:
-                items.append({"label": wd, "kind": "keyword" if not wd.startswith("$") else "system task", "insert": wd, "detail": ""})
-        return items
+    def _ac_context(self) -> dict:
+        return completion_context(self.text.get("1.0", "insert"))
 
-    def show_completions(self) -> None:
-        self._close_completions()
-        items = self._completion_items()
-        if not items:
+    def _ac_items(self, ctx: dict) -> list[dict]:
+        text = self.get_content()
+        known = self.completion_provider() if self.completion_provider else []
+        own = {m.group(1) for m in re.finditer(r"\bmodule\s+([A-Za-z_]\w*)", text)}
+        return build_items(ctx, text, known, own)
+
+    def show_completions(self, auto: bool = False) -> None:
+        """Open the IntelliSense popup for the caret context (Ctrl+Space, or live while typing when auto=True)."""
+        ctx = self._ac_context()
+        if ctx["mode"] == "none" or (auto and ctx["mode"] == "word" and len(ctx["prefix"]) < 2):
+            self._close_completions()
             return
-        sc = self.cfg.scheme
-        top = tk.Toplevel(self.text)
-        top.wm_overrideredirect(True)
-        top.attributes("-topmost", True)
-        lb = tk.Listbox(top, height=10, width=64, activestyle="none", font=self.font, bd=1, relief="solid",
-                        bg=sc["gutter_bg"], fg=sc["fg"], selectbackground=sc["selection"], selectforeground=sc["fg"],
-                        highlightthickness=0, exportselection=False)
-        lb.pack(fill="both", expand=True)
-        lb.bind("<Double-Button-1>", lambda e: self._comp_accept())
-        self._comp = {"top": top, "lb": lb, "all": items, "shown": []}
-        if not self._comp_refilter():
+        self._comp = {"ctx": ctx, "all": self._ac_items(ctx), "shown": [], "sel": 0, "top": 0, "auto": auto}
+        if self._comp_refilter():
+            self._ac_place()
+
+    def _auto_trigger(self, ch: str) -> None:
+        if not self.cfg.get("live_autocomplete", True) or self.text.tag_ranges("sel"):
             return
-        bbox = self.text.bbox("insert") or (0, 0, 0, 20)
-        x = self.text.winfo_rootx() + bbox[0]
-        y = self.text.winfo_rooty() + bbox[1] + bbox[3] + 2
-        top.wm_geometry(f"+{x}+{y}")
+        if self._comp and ch and ch in " ;,)]}=":       # VS Code: a separator dismisses the list
+            self._close_completions()
+        elif self._comp:
+            self._comp_refilter()
+        elif ch and (ch.isalnum() or ch in "_$`."):
+            self.show_completions(auto=True)
 
     def _comp_refilter(self) -> bool:
         c = self._comp
         if not c:
             return False
-        pre = self._prefix().lower()
-        shown = [i for i in c["all"] if i["label"].lower().startswith(pre)] if pre else c["all"]
-        shown += [i for i in c["all"] if pre and pre in i["label"].lower() and i not in shown]
+        ctx = self._ac_context()
+        old = c["ctx"]
+        if ctx["mode"] == "none" or (ctx["mode"] == "word" and not ctx["prefix"] and c["auto"]):
+            self._close_completions()
+            return False
+        if ctx["mode"] != old["mode"] or ctx.get("module") != old.get("module"):
+            c["all"] = self._ac_items(ctx)
+        c["ctx"] = ctx
+        shown = rank(c["all"], ctx["prefix"])
         if not shown:
             self._close_completions()
             return False
-        c["shown"] = shown[:200]
-        lb = c["lb"]
-        lb.delete(0, "end")
-        for i in c["shown"]:
-            tag = {"module": "◆", "input": "→", "output": "←", "inout": "↔", "keyword": "·", "system task": "$"}.get(i["kind"], "•")
-            lb.insert("end", f" {tag} {i['label']:<22} {i['detail'][:48]}")
-        lb.selection_set(0)
-        lb.see(0)
+        c["shown"], c["sel"], c["top"] = shown, 0, 0
+        self._ac_render()
+        if self._ac_win.winfo_ismapped():
+            self._ac_place()                          # shrink / grow with the list, follow the caret
         return True
+
+    # ---- popup window (created once per editor, never takes the keyboard focus)
+    def _ac_build(self) -> None:
+        if getattr(self, "_ac_win", None) is not None and self._ac_win.winfo_exists():
+            return
+        w = self._ac_win = tk.Toplevel(self.text)
+        w.withdraw()
+        w.overrideredirect(True)
+        try:
+            w.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self._ac_body = tk.Frame(w, bd=0, highlightthickness=0)
+        self._ac_body.pack(fill="both", expand=True, padx=1, pady=1)
+        self._ac_rows = []
+        for r in range(self.AC_ROWS):
+            row = tk.Frame(self._ac_body, bd=0, highlightthickness=0)
+            row.grid(row=r, column=0, sticky="ew")
+            badge = tk.Label(row, bd=0, width=2, anchor="center")
+            lab = tk.Label(row, bd=0, anchor="w")
+            det = tk.Label(row, bd=0, anchor="e")
+            badge.pack(side="left", padx=(4, 6), pady=1)
+            lab.pack(side="left")
+            det.pack(side="right", padx=(18, 8))
+            for wd in (row, badge, lab, det):
+                wd.bind("<Button-1>", lambda e, i=r: self._ac_click(i))
+                wd.bind("<MouseWheel>", lambda e: self._ac_scroll(-1 if e.delta > 0 else 1))
+            self._ac_rows.append((row, badge, lab, det))
+        self._ac_body.grid_columnconfigure(0, weight=1)
+        self._ac_doc = tk.Label(self._ac_body, bd=0, anchor="w", justify="left")
+        self._ac_doc.grid(row=self.AC_ROWS, column=0, sticky="ew")
+        if IS_WINDOWS:      # a tool window that never activates: the caret and keyboard stay in the editor
+            try:
+                import ctypes
+                w.update_idletasks()
+                hwnd = ctypes.windll.user32.GetParent(w.winfo_id()) or w.winfo_id()
+                style = ctypes.windll.user32.GetWindowLongW(hwnd, -20)
+                ctypes.windll.user32.SetWindowLongW(hwnd, -20, style | 0x08000000 | 0x00000080)   # NOACTIVATE|TOOLWINDOW
+            except Exception:
+                pass
+
+    def _ac_render(self) -> None:
+        c = self._comp
+        self._ac_build()
+        dark = is_dark(self.cfg)
+        bg, border = ("#252526", "#454545") if dark else ("#F8F8F8", "#C8C8C8")
+        fg, sel_bg, sel_fg = ("#CCCCCC", "#04395E", "#FFFFFF") if dark else ("#1F1F1F", "#0060C0", "#FFFFFF")
+        muted, accent = ("#858585", "#4EC9B0") if dark else ("#767676", "#16825D")
+        size = max(13, int(self.cfg["editor_font_size"]) - 1)
+        fam = self.cfg["editor_font_family"]
+        f, fb, fs = (fam, px_font(size, self)), (fam, px_font(size, self), "bold"), (fam, px_font(max(11, size - 2), self))
+        self._ac_win.configure(bg=border)
+        self._ac_body.configure(bg=bg)
+        shown, sel = c["shown"], c["sel"]
+        top = c["top"] = min(max(c["top"], sel - self.AC_ROWS + 1), sel)
+        for r, (row, badge, lab, det) in enumerate(self._ac_rows):
+            i = top + r
+            if i >= len(shown):
+                row.grid_remove()
+                continue
+            row.grid()
+            it = shown[i]
+            on = i == sel
+            rb = sel_bg if on else bg
+            bcol = self.AC_BADGE[it["kind"]][0 if dark else 1]
+            row.configure(bg=rb)
+            badge.configure(text=it["kind"], font=fb, bg=rb, fg=bcol)
+            lab.configure(text=it["label"], font=f, bg=rb, fg=sel_fg if on else (muted if it.get("done") else fg))
+            dcol = accent if it["kind"] in ("M", "P") else muted
+            det.configure(text=it["detail"][:40], font=fs, bg=rb, fg=sel_fg if on else dcol)
+        doc = shown[sel].get("doc", "") if shown else ""
+        self._ac_doc.configure(text=doc, font=fs, bg="#1E1E1E" if dark else "#EDEDED", fg=accent if shown[sel]["kind"] in ("M", "P") else fg,
+                               wraplength=int(620 * ui_scale(self)), padx=8, pady=4)
+        if doc:
+            self._ac_doc.grid()
+        else:
+            self._ac_doc.grid_remove()
+
+    def _ac_place(self) -> None:
+        if not self._comp:
+            return
+        w = self._ac_win
+        bbox = self.text.bbox("insert")
+        if not bbox:                                  # caret scrolled out of view: bring it back first
+            self.text.see("insert")
+            self.text.update_idletasks()
+            bbox = self.text.bbox("insert")
+        if not bbox:
+            self._close_completions()
+            return
+        w.update_idletasks()
+        ww, wh = max(w.winfo_reqwidth(), int(380 * ui_scale(self))), w.winfo_reqheight()
+        x = self.text.winfo_rootx() + bbox[0]
+        y = self.text.winfo_rooty() + bbox[1] + bbox[3] + 2
+        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        if y + wh > sh - 8:
+            y = self.text.winfo_rooty() + bbox[1] - wh - 2           # no room below: open above the line
+        w.geometry(f"{ww}x{wh}+{max(0, min(x, sw - ww - 4))}+{max(0, y)}")
+        if not w.winfo_ismapped():
+            self._ac_showing = True
+            w.deiconify()
+            w.lift()
+            self.after(150, lambda: setattr(self, "_ac_showing", False))
+        if self.focus_get() not in (self.text, None):
+            self.text.focus_set()
+
+    def _ac_click(self, r: int) -> None:
+        if self._comp:
+            self._comp["sel"] = self._comp["top"] + r
+            self._comp_accept()
+            self.text.focus_set()
+
+    def _ac_scroll(self, d: int) -> str:
+        if self._comp:
+            c = self._comp
+            c["top"] = max(0, min(len(c["shown"]) - self.AC_ROWS, c["top"] + d))
+            c["sel"] = min(max(c["sel"], c["top"]), c["top"] + self.AC_ROWS - 1)
+            self._ac_render()
+        return "break"
 
     def _comp_move(self, d: int):
         if not self._comp:
             return None
-        lb = self._comp["lb"]
-        cur = (lb.curselection() or (0,))[0]
-        nxt = max(0, min(lb.size() - 1, cur + d))
-        lb.selection_clear(0, "end")
-        lb.selection_set(nxt)
-        lb.see(nxt)
+        c = self._comp
+        c["sel"] = (c["sel"] + d) % len(c["shown"])
+        self._ac_render()
+        self._ac_place()
         return "break"
 
-    def _comp_accept(self) -> str:
+    def _comp_accept(self, newline_if_noop: bool = False):
         c = self._comp
         if not c:
             return "break"
-        sel = c["lb"].curselection()
-        item = c["shown"][sel[0] if sel else 0]
-        pre = self._prefix()
+        item = c["shown"][c["sel"]]
+        ctx = self._ac_context()
+        typed = self.text.get(f"insert-{ctx['replace']}c", "insert") if ctx["replace"] else ""
         self._close_completions()
-        if pre:
-            self.text.delete(f"insert-{len(pre)}c", "insert")
-        if item.get("snippet"):
+        if newline_if_noop and item["insert"] == typed:
+            return None                       # Enter after an already complete word ("end", "a"): normal newline
+        self.text.edit_separator()
+        if ctx["replace"]:
+            self.text.delete(f"insert-{ctx['replace']}c", "insert")
+        if CURSOR in item["insert"] or item.get("snippet"):
             self.insert_snippet(item["insert"])
         else:
             self.insert_text(item["insert"])
@@ -1336,16 +1437,23 @@ class VerilogCodeEditor(ctk.CTkFrame):
 
     def _close_completions(self) -> bool:
         if self._comp:
-            try:
-                self._comp["top"].destroy()
-            except tk.TclError:
-                pass
             self._comp = None
+            try:
+                self._ac_win.withdraw()
+            except (AttributeError, tk.TclError):
+                pass
             return True
         return False
 
     def _close_if_unfocused(self) -> None:
-        if self._comp and self.focus_get() not in (self.text, self._comp["lb"]):
+        """Focus left the editor (another widget, or another app): close - unless it was the popup appearing."""
+        if not self._comp or getattr(self, "_ac_showing", False):
+            return
+        try:
+            focus = self.focus_get()
+        except (KeyError, tk.TclError):
+            focus = None
+        if focus is not self.text:
             self._close_completions()
 
     # ------------------------------------------------------------------ find / replace

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 APP_NAME = "VeriFlow Studio"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 IS_WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -66,7 +66,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # --- startup & updates
     "startup_mode": "welcome_screen",    # welcome_screen | reopen_last | empty_window
     "last_parent_dir": "",               # where the New Module / Project wizard saved last time
-    "check_for_updates": True,           # GitHub release + main/version.json, on startup and every 30 min
+    "check_for_updates": True,
+    "live_autocomplete": True,           # IntelliSense pops up while typing (Ctrl+Space always works)           # GitHub release + main/version.json, on startup and every 30 min
 }
 BUILTIN_PACKAGE_NAME = "Course Built-in Library (compstruct\\lib)"
 

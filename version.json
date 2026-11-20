@@ -1,4 +1,4 @@
 {
-  "version": "1.4.0",
-  "notes": "VS Code Welcome Screen & Project Creation Wizard, font readability overhaul, dark context menus, auto-updater, hierarchy & gate analyzer"
+  "version": "1.5.0",
+  "notes": "VS Code IntelliSense autocomplete for keywords, gates, signals, existing modules and .port() connections, plus faster zoom"
 }
