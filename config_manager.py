@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 APP_NAME = "VeriFlow Studio"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 IS_WINDOWS = os.name == "nt"
 
 DEFAULT_CONFIG: dict[str, Any] = {

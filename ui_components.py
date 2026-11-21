@@ -195,12 +195,19 @@ class DarkMenu:
         body.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Frame(body, height=int(4 * sc), bg=th["bg"]).pack(fill="x")
         self.rows, self.active = [], -1
+        # rows have a fixed height (pack_propagate off), so they need an explicit width: measure the widest row
+        fm, fam = tkfont.Font(root=w, font=f), tkfont.Font(root=w, font=fa)
+        row_w = max([int(200 * sc)] + [
+            pad + fm.measure(it["label"]) + int(32 * sc)
+            + ((fam if it["kind"] == "command" else fm).measure(it.get("accel") or "›") + int(24 * sc) + pad
+               if it.get("accel") or it["kind"] == "cascade" else 0)
+            for it in self.items if it["kind"] != "sep"])
         for it in self.items:
             if it["kind"] == "sep":
                 tk.Frame(body, height=max(1, int(1 * sc)), bg=th["sep"]).pack(fill="x", padx=int(8 * sc), pady=int(4 * sc))
                 continue
             disabled = it.get("state") == "disabled"
-            row = tk.Frame(body, bg=th["bg"], height=row_h, cursor="hand2" if not disabled else "")
+            row = tk.Frame(body, bg=th["bg"], height=row_h, width=row_w, cursor="hand2" if not disabled else "")
             row.pack(fill="x", padx=int(4 * sc))
             row.pack_propagate(False)
             fg = th["disabled"] if disabled else th["fg"]

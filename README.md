@@ -4,18 +4,63 @@
 
 # VeriFlow Studio — VS Code-Styled Icarus Verilog IDE & One-Click Runner
 
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D6?logo=windows&logoColor=white)
+![Latest release](https://img.shields.io/github/v/release/Nirco99/veriflow-studio?label=latest%20version&color=2EA043)
 ![Icarus Verilog -g2012](https://img.shields.io/badge/Icarus%20Verilog-(--g2012)-8A2BE2)
-![CustomTkinter](https://img.shields.io/badge/GUI-CustomTkinter-1F6AA5)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%2F%20Cross--Platform-0078D6?logo=windows&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
-[![Download VeriFlowStudio.exe for Windows](https://img.shields.io/badge/Download-VeriFlowStudio.exe%20%28Windows%29-2EA043?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)
+<a id="download"></a>
 
-**No Python needed:** download the exe above, double-click it, and you're coding. If Windows shows *"Windows protected your PC"*,
-click **More info → Run anyway** (the exe is not code-signed). All versions: [Releases](https://github.com/Nirco99/veriflow-studio/releases).
+## ⬇️ Download (Windows)
 
-![VeriFlow Studio – VS Code Dark Modern workbench](docs/screenshot.png)
+<p align="center">
+  <a href="https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe">
+    <img src="https://img.shields.io/badge/%E2%AC%87%20Download-VeriFlowStudio.exe%20(Windows)-2EA043?style=for-the-badge&logo=windows&logoColor=white" height="60" alt="Download VeriFlowStudio.exe">
+  </a>
+</p>
+<h3 align="center"><a href="https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe">⬇️ Download VeriFlowStudio.exe (latest version)</a></h3>
+
+| Step | What to do |
+|:---:|---|
+| **1** | Click the green **Download** button above. `VeriFlowStudio.exe` (about 32 MB, always the latest version) starts downloading. |
+| **2** | Double-click the file. **Nothing to install** and no Python needed. Keep it anywhere (Desktop, Documents) and pin it to the taskbar. |
+| **3** | If Windows shows *"Windows protected your PC"*, click **More info → Run anyway** (the file isn't code-signed). |
+| **4** | Make sure **Icarus Verilog** is installed at `C:\iverilog`, as in the course. Without it VeriFlow still opens, in demo mode. |
+| **5** | Done. New versions show up inside the app: **🔔 Update Available → Update & Restart Now**. |
+
+Button not working? Open the **[latest release page](https://github.com/Nirco99/veriflow-studio/releases/latest)** and click **`VeriFlowStudio.exe`** under **Assets**.
+
+🇮🇱 **הוראות הורדה בעברית: [כאן](#download-he)**
+
+<a id="screenshots"></a>
+
+## 📸 Screenshots
+
+<p align="center"><img src="docs/screenshots/02-editor-run-console.png" width="100%" alt="Editor, testbench and a self-checking run"></p>
+<p align="center"><sub><b>Design + testbench side by side, one-click run (F5), self-checking PASS lines</b></sub></p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/01-welcome.png" alt="Welcome page"><br><sub><b>Welcome page</b>: new module / assignment, open folder, recent folders</sub></td>
+    <td width="50%"><img src="docs/screenshots/06-intellisense-modules.png" alt="IntelliSense module list"><br><sub><b>Live IntelliSense</b>: modules from your folder, the course library and your packages</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/07-intellisense-ports.png" alt="Port completion"><br><sub><b>Port completion</b>: type <code>.</code> inside an instance to see its ports</sub></td>
+    <td><img src="docs/screenshots/03-truth-table.png" alt="Truth table"><br><sub><b>Truth table</b> with radix switch, filters and PASS/FAIL status</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/04-waveform.png" alt="Waveform viewer"><br><sub><b>Waveform viewer</b> (VCD) with zoom and cursor</sub></td>
+    <td><img src="docs/screenshots/05-hierarchy-pinout.png" alt="Hierarchy and pinout"><br><sub><b>Hierarchy & gate count</b> plus the IC pinout diagram</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/09-new-module-wizard.png" alt="New module wizard"><br><sub><b>New Module wizard</b>: folder, ports and testbench in one step</sub></td>
+    <td><img src="docs/screenshots/10-package-manager.png" alt="Package manager"><br><sub><b>Packages</b>: load lecturer modules once, use them in every folder</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/08-context-menu.png" alt="Context menu"><br><sub><b>Right-click menu</b>: generate a testbench, open in Notepad++</sub></td>
+    <td><img src="docs/screenshots/11-light-theme.png" alt="Light theme"><br><sub><b>Light theme</b> (☀ button), with every size scaling together</sub></td>
+  </tr>
+</table>
 
 ---
 
@@ -27,7 +72,7 @@ click **More info → Run anyway** (the exe is not code-signed). All versions: [
 
 1. [Overview & motivation](#overview--motivation)
 2. [Features](#features)
-3. [Installation & quick start](#installation--quick-start)
+3. [Download & quick start](#download--quick-start)
 4. [Step-by-step usage guide](#step-by-step-usage-guide)
 5. [Settings reference](#settings-reference)
 6. [Keyboard shortcuts](#keyboard-shortcuts)
@@ -60,6 +105,8 @@ Then you scroll through raw `$monitor` text to find the one row that is wrong, g
 ### Features
 
 #### ▶ One-click atomic pipeline (`F5` / `▶ Run`)
+
+<p align="center"><img src="docs/screenshots/02-editor-run-console.png" width="860" alt="Editor and run"></p>
 
 Every run performs, in order:
 
@@ -124,6 +171,8 @@ VeriFlow, it refuses to overwrite them and warns you instead.
   ```
 
 #### 📦 Global Module & Package Loader ("Import Once, Run Anywhere")
+
+<p align="center"><img src="docs/screenshots/10-package-manager.png" width="720" alt="Package manager"></p>
 
 Lecturers hand out modules as loose `.v` files, as a folder, or as a Moodle `.zip` – often with **several modules in one
 file** (`course_primitives.v`) or a **file name that differs from the module name** (`mux_lib.v` containing
@@ -261,6 +310,8 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 
 #### 📊 Interactive truth table & radix converter
 
+<p align="center"><img src="docs/screenshots/03-truth-table.png" width="860" alt="Truth table"></p>
+
 * `$monitor` / `$display` output is parsed automatically – both `key=value` style (`a=0 | b=1 | s=1`) and plain
   tabular output with a header row. `VCD info:` and `$finish called at …` lines are ignored.
 * Rows whose outputs contain `x` or `z` are tagged **FLOATING/CONFLICT (x/z)** (orange); rows containing `FAIL`,
@@ -272,6 +323,8 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 
 #### 〰 Built-in waveform viewer & GTKWave integration
 
+<p align="center"><img src="docs/screenshots/04-waveform.png" width="860" alt="Waveform viewer"></p>
+
 * Pure-Python `.vcd` reader (multi-character identifier codes, scalar and vector values, `x`/`z`).
 * Canvas rendering: green high/low lines, hexagonal bus envelopes with the value printed in the current radix,
   red hatched blocks for `x`, yellow mid-lines for `z`, a time axis, zoom in/out, fit, and a click-to-place cursor that
@@ -281,6 +334,8 @@ file at that line (the editor for the current module, Notepad++ for any other fi
 * `📈 Open in GTKWave` opens the same dump in GTKWave.
 
 #### 🌳 Hierarchy & gate-count analyzer + IC pinout (`HIERARCHY & GATES` tab)
+
+<p align="center"><img src="docs/screenshots/05-hierarchy-pinout.png" width="860" alt="Hierarchy and pinout"></p>
 
 * An **instance tree** of the active module across the workspace and all enabled packages – e.g.
   `FA → ha1 : HalfAdder → g1 : xor, g2 : and`. Each row shows where the module is defined (file + package);
@@ -292,6 +347,10 @@ file at that line (the editor for the current module, Notepad++ for any other fi
   their `[msb:lsb]` range, and the module name with its gate count and depth on the chip.
 
 #### ⌨ Live IntelliSense autocomplete (as you type + `Ctrl+Space`)
+
+<p align="center"><img src="docs/screenshots/06-intellisense-modules.png" width="860" alt="IntelliSense: modules"></p>
+
+<p align="center"><img src="docs/screenshots/07-intellisense-ports.png" width="860" alt="IntelliSense: ports"></p>
 
 * A VS Code style suggestion list opens **while you type**: after 2 letters of a name, on `$`, on `` ` `` and on `.`
   inside a module instance. `Ctrl+Space` opens it at any time. The popup never takes the keyboard focus, so you can
@@ -335,6 +394,10 @@ dumps are left in place (delete them manually if your course asks you to).
 
 #### 🔠 Comfortable typography, global zoom & size presets
 
+<p align="center"><img src="docs/screenshots/08-context-menu.png" width="860" alt="Dark context menu"></p>
+
+<p align="center"><img src="docs/screenshots/11-light-theme.png" width="860" alt="Light theme"></p>
+
 * Comfortable defaults: **15 pt** editor, **13 pt** console and **13 pt** UI text (Segoe UI for menus, tabs, sidebar and
   buttons; Consolas for code, tables and the waveform/pinout labels). Configs saved by older versions with smaller
   sizes are lifted to these defaults once, on first start.
@@ -350,6 +413,10 @@ dumps are left in place (delete them manually if your course asks you to).
   (📂 🔍 🧪 💾 ⚡ 📦 📝 🧹) and show a tooltip on hover; the labels come back as soon as there is room.
 
 #### 🏠 Welcome / Get Started page & New Module / Project wizard
+
+<p align="center"><img src="docs/screenshots/01-welcome.png" width="860" alt="Welcome page"></p>
+
+<p align="center"><img src="docs/screenshots/09-new-module-wizard.png" width="720" alt="New Module wizard"></p>
 
 * On launch VeriFlow opens a VS Code style **Welcome page** in the editor area instead of jumping into a folder:
   * **Start** – `📄 New Verilog Module / File… (Ctrl+N)`, `📁 Create New Assignment / Project Folder… (Ctrl+Shift+N)`,
@@ -398,45 +465,18 @@ If `iverilog.exe` is not found, an amber banner appears and VeriFlow switches to
 simulator** (1-bit designs made of `and/or/nand/nor/xor/xnor/not/buf` primitives and simple `assign`s), so the editor,
 linter, truth table and waveform can be explored on any machine. Lecturer modules and buses need the real toolchain.
 
-### Installation & quick start
+### Download & quick start
 
-#### Prerequisites
-
-1. **Icarus Verilog** installed at `C:\iverilog` (`C:\iverilog\bin\iverilog.exe`, `C:\iverilog\bin\vvp.exe`) and the
+1. **Download [VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)** (the green button at the [top of this page](#download)) and double-click it.
+   No installation and no Python. If Windows SmartScreen appears: **More info → Run anyway**.
+2. **Icarus Verilog** installed at `C:\iverilog` (`C:\iverilog\bin\iverilog.exe`, `C:\iverilog\bin\vvp.exe`) with the
    lecturer library at `C:\iverilog\compstruct\lib`. Other locations can be set in **⚙ Settings → Compiler &
    Toolchain** (there is an **Auto-Detect Paths** button). Without Icarus Verilog the app runs in demo mode.
-2. **Python 3.11+** – only if you run from source.
 3. *(Optional)* **Notepad++** for Live Sync and **GTKWave** for the external waveform viewer.
-
-#### Fastest — download the ready-made `.exe`
-
-Download **[VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)**
-from the [latest release](https://github.com/Nirco99/veriflow-studio/releases/latest) and double-click it – no Python or
-installation required. Each release lists the file's SHA-256 so you can verify the download.
-
-#### Option A — run from source
-
-```bash
-git clone https://github.com/Nirco99/veriflow-studio.git
-cd veriflow-studio
-pip install -r requirements.txt
-python main.py
-```
-
-You can also pass a folder to open: `python main.py "D:\CompStruct\HW3"`.
-
-#### Option B — build a standalone Windows `.exe` (no Python needed to run it)
-
-Double-click **`build_exe.bat`**. It installs the requirements, checks the sources, and runs PyInstaller:
-
-```bat
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowStudio ^
-    --collect-data customtkinter --hidden-import pygments.lexers.hdl ^
-    --add-data "sample_project;sample_project" main.py
-```
-
-The result is a single portable file, **`dist\VeriFlowStudio.exe`** (~32 MB). Pin it to the taskbar or share it with
-classmates. On first launch the bundled demo is copied to `Documents\VeriFlow Studio\sample_project` and opened.
+4. The **Welcome page** opens: create a new assignment folder (`Ctrl+Shift+N`), open an existing one (`Ctrl+O`), or try
+   the built-in sample project.
+5. **Updates are automatic**: when a new version is released, a 🔔 notification offers **Update & Restart Now**.
+   All versions and release notes: [Releases](https://github.com/Nirco99/veriflow-studio/releases).
 
 ### Step-by-step usage guide
 
@@ -550,10 +590,10 @@ veriflow-studio/
 ├── version.json         # {"version", "notes"} on main - bump it to notify users running from source
 ├── package_manager.py   # Global package vault: .v / folder / .zip import, enable/remove, -y / -l resolution,
 │                        # conflict-free cached copies of library files
-├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
+├── build_exe.bat        # maintainers: builds the released VeriFlowStudio.exe
 ├── requirements.txt     # customtkinter, pygments, pyinstaller
 ├── sample_project/      # FullAdder.v + FullAdder_tb.v demo (gate-level, self-checking testbench)
-└── docs/screenshot.png
+└── docs/screenshots/     # README screenshots
 ```
 
 The parser and runner have no GUI dependencies and can be imported and tested on their own, e.g.:
@@ -593,17 +633,34 @@ Released under the [MIT License](LICENSE).
 
 # VeriFlow Studio — סביבת פיתוח ל-Icarus Verilog בסגנון VS Code עם הרצה בלחיצה אחת
 
-[![הורדת VeriFlowStudio.exe ל-Windows](https://img.shields.io/badge/Download-VeriFlowStudio.exe%20%28Windows%29-2EA043?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)
+<a id="download-he"></a>
 
-**לא צריך Python:** מורידים את הקובץ בכפתור למעלה, לוחצים עליו פעמיים ומתחילים לעבוד. אם Windows מציג
-*"Windows protected your PC"*, לוחצים **More info ← Run anyway** (הקובץ לא חתום דיגיטלית). כל הגרסאות:
-[Releases](https://github.com/Nirco99/veriflow-studio/releases).
+## ⬇️ הורדה (Windows)
+
+<p align="center">
+  <a href="https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe">
+    <img src="https://img.shields.io/badge/%E2%AC%87%20Download-VeriFlowStudio.exe%20(Windows)-2EA043?style=for-the-badge&logo=windows&logoColor=white" height="60" alt="Download VeriFlowStudio.exe">
+  </a>
+</p>
+<h3 align="center"><a href="https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe">⬇️ להורדת VeriFlowStudio.exe (הגרסה האחרונה)</a></h3>
+
+| שלב | מה עושים |
+|:---:|---|
+| **1** | לוחצים על כפתור ה-**Download** הירוק למעלה. הקובץ `VeriFlowStudio.exe` (בערך 32MB, תמיד הגרסה האחרונה) מתחיל לרדת. |
+| **2** | לוחצים על הקובץ פעמיים. **אין מה להתקין** ולא צריך Python. אפשר לשמור אותו בכל מקום (שולחן העבודה, מסמכים) ולהצמיד לשורת המשימות. |
+| **3** | אם Windows מציג *"Windows protected your PC"*, לוחצים **More info ← Run anyway** (הקובץ לא חתום דיגיטלית). |
+| **4** | מוודאים ש-**Icarus Verilog** מותקן ב-`C:\iverilog`, כמו בקורס. בלעדיו VeriFlow עדיין נפתח, במצב הדגמה. |
+| **5** | זהו. גרסאות חדשות מופיעות בתוך התוכנה: **🔔 Update Available ← Update & Restart Now**. |
+
+הכפתור לא עובד? פותחים את **[דף הגרסה האחרונה](https://github.com/Nirco99/veriflow-studio/releases/latest)** ולוחצים על **`VeriFlowStudio.exe`** תחת **Assets**.
+
+צילומי מסך של כל המסכים: [📸 Screenshots](#screenshots).
 
 ### תוכן עניינים
 
 1. [סקירה ומוטיבציה](#סקירה-ומוטיבציה)
 2. [יכולות](#יכולות)
-3. [התקנה והפעלה מהירה](#התקנה-והפעלה-מהירה)
+3. [הורדה והפעלה מהירה](#הורדה-והפעלה-מהירה)
 4. [מדריך שימוש צעד אחר צעד](#מדריך-שימוש-צעד-אחר-צעד)
 5. [טבלת הגדרות](#טבלת-הגדרות)
 6. [קיצורי מקלדת](#קיצורי-מקלדת)
@@ -639,6 +696,12 @@ C:\iverilog\bin\vvp FullAdder
 ### יכולות
 
 #### ▶ תהליך הרצה אטומי בלחיצה אחת (`F5` / `▶ Run`)
+
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/02-editor-run-console.png" width="860" alt="Editor and run"></p>
+
+</div>
 
 כל הרצה מבצעת לפי הסדר:
 
@@ -693,6 +756,12 @@ Linter, מקמפל, מסמלץ ומעדכן את טבלת האמת ואת הגל
   כפתורים מדביקים חיווט מוכן: `📋 Copy Instantiation` ו-`⤵ Insert at Cursor`.
 
 #### 📦 מנהל חבילות וטעינת מודולים גלובלית (טעינה חד-פעמית ושימוש מכל תיקייה במחשב)
+
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/10-package-manager.png" width="720" alt="Package manager"></p>
+
+</div>
 
 מרצים מחלקים מודולים כקבצי `.v` בודדים, כתיקייה, או כקובץ `.zip` מה-Moodle – ולעיתים קרובות עם **כמה מודולים בקובץ
 אחד** (`course_primitives.v`) או עם **שם קובץ ששונה משם המודול** (`mux_lib.v` שמכיל `module Mux4`). הפקודה הרגילה
@@ -823,6 +892,12 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 
 #### 📊 טבלת אמת אינטראקטיבית וממיר בסיסים
 
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/03-truth-table.png" width="860" alt="Truth table"></p>
+
+</div>
+
 * הפלט של `$monitor` / `$display` מפוענח אוטומטית – גם בסגנון `key=value` (`a=0 | b=1 | s=1`) וגם בטבלה רגילה עם
   שורת כותרת. שורות `VCD info:` ו-`$finish called at …` מסוננות.
 * שורות שהיציאות שלהן מכילות `x` או `z` מסומנות **FLOATING/CONFLICT (x/z)** (כתום); שורות עם `FAIL`, `ERROR` או
@@ -834,6 +909,12 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 
 #### 〰 מציג גלים מובנה ושילוב עם GTKWave
 
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/04-waveform.png" width="860" alt="Waveform viewer"></p>
+
+</div>
+
 * קורא `.vcd` שכתוב כולו ב-Python (מזהים מרובי תווים, ערכים סקלריים ווקטוריים, `x`/`z`).
 * ציור על קנבס: קווי 0/1 ירוקים, "משושים" לאפיקים עם הערך בבסיס הנבחר, מלבן אדום מקווקו ל-`x`, קו צהוב באמצע ל-`z`,
   ציר זמן, הגדלה/הקטנה, התאמה לחלון, וסמן שמוצב בלחיצה ומציג את ערך כל אות באותו רגע.
@@ -842,6 +923,12 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 * `📈 Open in GTKWave` פותח את אותו קובץ ב-GTKWave.
 
 #### 🌳 ניתוח היררכיה וספירת שערים + תרשים פינים (לשונית `HIERARCHY & GATES`)
+
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/05-hierarchy-pinout.png" width="860" alt="Hierarchy and pinout"></p>
+
+</div>
 
 * **עץ מופעים** של המודול הפעיל על פני תיקיית העבודה וכל החבילות הפעילות – למשל
   `FA ← ha1 : HalfAdder ← g1 : xor, g2 : and`. כל שורה מציגה איפה המודול מוגדר (קובץ + חבילה); לחיצה על מופע פותחת
@@ -852,6 +939,14 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
   ושם המודול עם מספר השערים והעומק על השבב.
 
 #### ⌨ השלמה אוטומטית חיה בסגנון IntelliSense (תוך כדי הקלדה + `Ctrl+Space`)
+
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/06-intellisense-modules.png" width="860" alt="IntelliSense: modules"></p>
+
+<p align="center"><img src="docs/screenshots/07-intellisense-ports.png" width="860" alt="IntelliSense: ports"></p>
+
+</div>
 
 * רשימת הצעות בסגנון VS Code נפתחת **תוך כדי הקלדה**: אחרי 2 אותיות של שם, על `$`, על `` ` `` ועל `.` בתוך מופע של
   מודול. `Ctrl+Space` פותח אותה בכל רגע. החלונית לא לוקחת את המקלדת, כך שאפשר להמשיך להקליד כדי לסנן. `↑`/`↓` לתנועה,
@@ -896,6 +991,14 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 
 #### 🔠 טיפוגרפיה נוחה, זום גלובלי ופריסטים של גודל טקסט
 
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/08-context-menu.png" width="860" alt="Dark context menu"></p>
+
+<p align="center"><img src="docs/screenshots/11-light-theme.png" width="860" alt="Light theme"></p>
+
+</div>
+
 * ברירות מחדל נוחות לקריאה: **15** בעורך, **13** בקונסולה ו-**13** בממשק (Segoe UI לתפריטים, לשוניות, סרגל צד וכפתורים;
   Consolas לקוד, לטבלאות ולתוויות של הגלים ותרשים הפינים). הגדרות שנשמרו בגרסאות קודמות עם גדלים קטנים יותר מוגדלות
   לברירות המחדל האלה פעם אחת, בהפעלה הראשונה.
@@ -911,6 +1014,14 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
   הסבר במעבר עכבר; התוויות חוזרות ברגע שיש מקום.
 
 #### 🏠 מסך פתיחה (Welcome) ואשף מודול / פרויקט חדש
+
+<div dir="ltr">
+
+<p align="center"><img src="docs/screenshots/01-welcome.png" width="860" alt="Welcome page"></p>
+
+<p align="center"><img src="docs/screenshots/09-new-module-wizard.png" width="720" alt="New Module wizard"></p>
+
+</div>
 
 * בהפעלה VeriFlow פותח **מסך פתיחה** בסגנון VS Code באזור העורך, במקום לקפוץ ישר לתיקייה:
   * **Start** – `📄 New Verilog Module / File… (Ctrl+N)`, `📁 Create New Assignment / Project Folder… (Ctrl+Shift+N)`,
@@ -956,53 +1067,18 @@ iverilog -g2012 -oTop -y "D:\HW4" -y "C:\iverilog\compstruct\lib" -y "%USERPROFI
 שבנויים מ-`and/or/nand/nor/xor/xnor/not/buf` ו-`assign` פשוטים), כך שאפשר להתנסות בעורך, ב-Linter, בטבלת האמת ובגלים
 בכל מחשב. מודולים של המרצה ואפיקים דורשים את הכלים האמיתיים.
 
-### התקנה והפעלה מהירה
+### הורדה והפעלה מהירה
 
-#### דרישות מקדימות
-
-1. **Icarus Verilog** מותקן ב-`C:\iverilog` (`C:\iverilog\bin\iverilog.exe`, `C:\iverilog\bin\vvp.exe`) וספריית
+1. **מורידים את [VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)** (הכפתור הירוק [בראש הקטע העברי](#download-he)) ולוחצים עליו פעמיים.
+   בלי התקנה ובלי Python. אם מופיע SmartScreen של Windows: **More info ← Run anyway**.
+2. **Icarus Verilog** מותקן ב-`C:\iverilog` (`C:\iverilog\bin\iverilog.exe`, `C:\iverilog\bin\vvp.exe`) וספריית
    המרצה ב-`C:\iverilog\compstruct\lib`. מיקומים אחרים מוגדרים ב-**⚙ Settings → Compiler & Toolchain** (יש כפתור
-   **Auto-Detect Paths**). בלי Icarus Verilog האפליקציה רצה במצב הדגמה.
-2. **Python 3.11+** – רק אם מריצים מקוד המקור.
+   **Auto-Detect Paths**). בלי Icarus Verilog התוכנה רצה במצב הדגמה.
 3. *(אופציונלי)* **Notepad++** לסנכרון החי ו-**GTKWave** להצגת גלים חיצונית.
-
-#### הכי מהיר — הורדת קובץ ה-`.exe` המוכן
-
-מורידים את **[VeriFlowStudio.exe](https://github.com/Nirco99/veriflow-studio/releases/latest/download/VeriFlowStudio.exe)**
-מתוך [הגרסה האחרונה](https://github.com/Nirco99/veriflow-studio/releases/latest) ולוחצים עליו פעמיים – בלי Python ובלי
-התקנה. בכל גרסה מופיע ה-SHA-256 של הקובץ, כדי שאפשר יהיה לוודא שההורדה תקינה.
-
-#### אפשרות א' — הרצה מקוד המקור
-
-<div dir="ltr" align="left">
-
-```bash
-git clone https://github.com/Nirco99/veriflow-studio.git
-cd veriflow-studio
-pip install -r requirements.txt
-python main.py
-```
-
-</div>
-
-אפשר גם להעביר תיקייה לפתיחה: `python main.py "D:\CompStruct\HW3"`.
-
-#### אפשרות ב' — בניית קובץ `.exe` עצמאי ל-Windows (לא צריך Python כדי להריץ אותו)
-
-לוחצים פעמיים על **`build_exe.bat`**. הוא מתקין את התלויות, בודק את הקוד ומריץ PyInstaller:
-
-<div dir="ltr" align="left">
-
-```bat
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name VeriFlowStudio ^
-    --collect-data customtkinter --hidden-import pygments.lexers.hdl ^
-    --add-data "sample_project;sample_project" main.py
-```
-
-</div>
-
-התוצאה היא קובץ נייד יחיד, **`dist\VeriFlowStudio.exe`** (כ-32MB). אפשר להצמיד אותו לשורת המשימות או לשתף עם חברים
-לקורס. בהפעלה הראשונה פרויקט ההדגמה מועתק ל-`Documents\VeriFlow Studio\sample_project` ונפתח.
+4. נפתח **מסך הפתיחה**: יוצרים תיקיית תרגיל חדשה (`Ctrl+Shift+N`), פותחים תיקייה קיימת (`Ctrl+O`), או מנסים את
+   פרויקט הדוגמה המובנה.
+5. **העדכונים אוטומטיים**: כשיוצאת גרסה חדשה, מופיעה התראת 🔔 עם **Update & Restart Now**.
+   כל הגרסאות והערות השחרור: [Releases](https://github.com/Nirco99/veriflow-studio/releases).
 
 ### מדריך שימוש צעד אחר צעד
 
@@ -1110,10 +1186,10 @@ veriflow-studio/
 ├── updater.py           # GitHub update checker + 1-click self-updater (standard library only)
 ├── version.json         # current version + notes on main (update notifications)
 ├── package_manager.py   # Global package vault, .v / folder / .zip import, -y / -l resolution
-├── build_exe.bat        # One-click PyInstaller build -> dist\VeriFlowStudio.exe
+├── build_exe.bat        # maintainers: builds the released VeriFlowStudio.exe
 ├── requirements.txt
 ├── sample_project/      # FullAdder.v + FullAdder_tb.v
-└── docs/screenshot.png
+└── docs/screenshots/     # README screenshots
 ```
 
 </div>
@@ -1130,7 +1206,6 @@ veriflow-studio/
   אוטומטי של הכלים.
 * **`package_manager.py`** – כספת החבילות הגלובלית: ייבוא קבצי `.v`, תיקיות וארכיוני `.zip`, הפעלה/הסרה של חבילות,
   חישוב דגלי `-y` / `-l` לכל קומפילציה ועותקים שמורים ללא התנגשויות של קובצי ספרייה.
-* **`build_exe.bat`** – בנייה בלחיצה אחת ל-`dist\VeriFlowStudio.exe`.
 * **`sample_project/`** – הדגמה: מחבר מלא (Full Adder) ברמת שערים עם טסטבנץ' שבודק את עצמו.
 
 ### פתרון תקלות
