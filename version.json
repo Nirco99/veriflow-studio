@@ -1,4 +1,4 @@
 {
-  "version": "1.5.0",
-  "notes": "VS Code IntelliSense autocomplete for keywords, gates, signals, existing modules and .port() connections, plus faster zoom"
+  "version": "1.5.1",
+  "notes": "Fix: right-click menus opened too narrow to read. README is now download-only with screenshots."
 }
